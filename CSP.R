@@ -70,29 +70,55 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
   foldedData = do.call(data.folds.split, modifyList( args.in, list(data=data) ))
   #method to use:
   methodStr = ifelse( grepl("spec", tolower(method)), "SpecCSP.apply", "CSP.apply" )
-  args.in = .eval_ellipsis(methodStr, ...)
-  logtrans = eval( args.in$logtransform )
+  args.in = .eval_ellipsis(methodStr, ...); args.in[["..."]] = NULL
+  args.feat = .eval_ellipsis("CSP.get_features", ...)
+  args.in = modifyList(args.in, args.feat[3:4])
   #loop over fold data to create CSP features:
   CSPfolds = lapply(foldedData, function(fold) {
-    csp = do.call(methodStr, modifyList( args.in, list(data=fold$train) ))
-    trainData = cbind(1:length(csp$outcome), csp$outcome, csp$features)
-    temp = CSP.get_features(fold$test, csp$filters, logtrans)
-    nsamples = data.get_samplenum(fold$test)
-    testData = cbind(1:nrow(temp), fold$test[ seq(1, nrow(fold$test), nsamples), 2], temp)
-    list(train=trainData, test=testData, CSP=csp)
+    .CSP.create_sets(fold$train, fold$test, args.in, args.feat, methodStr=methodStr)
   })
   #continue fitting ML model to CSP features:
   args.in = list(...)
+  if ( eval( args.feat$logtransform ) & eval( args.feat$approximate ) ) {
+    args.in = modifyList(args.in, list(scale=F)) #scaling done via logtransformation
+  }
   CSPfits = lapply(CSPfolds, function(fold) {
     do.call(data.fit_model, modifyList( args.in, list(trainData=fold$train, 
-                                                      testData=fold$test, scale=!logtrans) ))
+                                                      testData=fold$test) ))
   })
   return( list(summary=sapply(CSPfits, "[[", "AUC"), 
                ML = CSPfits, CSP = lapply(CSPfolds, "[[", "CSP") ))
 }
 
+.CSP.create_sets <- function(train, test, args.csp, args.feat, methodStr="CSP.apply") {
+  ## helper to prepare train and test set with CSP procedure
+  #args.csp: arguments to CSP function
+  #args.feat: arguments to CSP.get_features function
+  #methodStr: CSP.apply or SpecCSP.apply
+  #RETURNS ---
+  #trainData, testData, CSP output
+  train = data.check(train, aslist=F)
+  test = data.check(test, aslist=F)
+  if ( eval(args.feat$approximate) ) { #1 value per trial
+    train.nsamples = data.get_samplenum(train) 
+    test.nsamples = data.get_samplenum(test)
+    train.outcome = train[ seq(1, nrow(train), train.nsamples), 2]
+    test.outcome = test[ seq(1, nrow(test), test.nsamples), 2]
+    train.n = 1:length(train.outcome)
+    test.n = 1:length(test.outcome)
+  } else { #dimensionality is the same as before
+    train.n = train[,1]; test.n = test[,1] 
+    train.outcome = train[,2]; test.outcome = test[,2]
+  }
+  csp = do.call(methodStr, modifyList( args.csp, list(data=train) ))
+  trainData = data.frame(train.n, train.outcome, csp$features)
+  testData = data.frame(test.n, test.outcome,
+      do.call(CSP.get_features, modifyList( args.feat, list(data=fold$test, filters=csp$filters) )))
+  return( list(train=trainData, test=testData, CSP=csp))
+}
+
 #CSP paradigm
-CSP.apply <- function(data, npattern=3, logtransform=T, baseline=NULL) {
+CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
   ## main function of the CSP paradigm: applies the spatial filters for feature extraction
   ## features are maximally informative with respect to the contrasted condition
   #INPUT ---
@@ -169,25 +195,34 @@ CSP.apply <- function(data, npattern=3, logtransform=T, baseline=NULL) {
   #each projection captures a different spatial localization
   #the filtered signal is uncorrelated in both conditions
   #the features are extracted per trial
-  features = CSP.get_features(trialdata, filters, logtransform=logtransform)
+  args.in = .eval_ellipsis("CSP.get_features", ...)
+  features = do.call(CSP.get_features, modifyList( args.in, list(data=trialdata, filters=filters) ))
   return(list(outcome=target,
               features=features, 
               filters=filters, 
-              patterns=patterns, 
-              logtransformed=logtransform))
+              patterns=patterns))
 }
 
-CSP.get_features <- function(data, filters, logtransform=T) {
+CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
   ## project measurements onto spatial CSP filters
   #INPUT ---
   #data: df or list of trials
   #filters: spatial filters, e.g. output by CSP.apply
+  #approximate: if True, the variance per trial is computed to
+  #             approximate band power
+  #             otherwise, the components are returned
   #logtransform: if True, variance is logtransformed
   trialdata = data.check(data, aslist=T, strip=T)
-  features = t(sapply(trialdata, function(td) apply(as.matrix(td) %*% filters, 2, var)))
-  if (logtransform) { 
-    return( log(features) )
+  if (approximate) { 
+    #variance per trial
+    features = t(sapply(trialdata, function(td) apply(as.matrix(td) %*% filters, 2, var)))
+    if (logtransform) { 
+      features = log(features)
     }
+    return(features)
+  }
+  #components
+  features = plyr::rbind.fill.matrix( lapply(trialdata, function(td) as.matrix(td) %*% filters) )
   return(features)
 }
 
@@ -209,7 +244,7 @@ CSP.get_features <- function(data, filters, logtransform=T) {
 #   return(sliced_logvar)
 # } 
 
-CSP.write_patterns <- function(patternlist) {
+.CSP.write_patterns <- function(patternlist) {
   ## function to write CSP pattern data into a matlab friendly format
   #INPUT ---
   #patternlist: output from CSP.apply
@@ -223,7 +258,7 @@ CSP.write_patterns <- function(patternlist) {
 }
 
 SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2), 
-                          steps=3, srate=500, logtransform=T) {
+                          steps=3, srate=500, ...) {
   ##Spectrally weighted CSP, cf. Tomioka et al. 2006
   ##if frequency band is unknown, this algorithm tries to do simultaneous
   ##spatio-temporal filter optimization, i.e iterative updating of bandpass-filter and weights
@@ -392,7 +427,8 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2),
   W = W[,c( (ncol(W)-npattern+1):ncol(W), 1:npattern )]
   P = P[,c( (ncol(P)-npattern+1):ncol(P), 1:npattern )]
   
-  features = CSP.get_features(trialdata, W, logtransform=logtransform)
+  args.in = .eval_ellipsis("CSP.get_features", ...)
+  features = do.call(CSP.get_features, modifyList( args.in, list(data=trialdata, filters=W) ))
   return(
     list(alpha=rbind(matrix(0,min(bands)-1,2*npattern), 
                      unname(t(plyr::ldply(alpha))), 

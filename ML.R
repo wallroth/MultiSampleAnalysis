@@ -25,8 +25,11 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
     .loadFuncs(CSP=T)
     args.csp = modifyList( .eval_ellipsis("CSP.apply", ...), list(baseline=NULL) )
     args.csp.feat = .eval_ellipsis("CSP.get_features", ...)
+    args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.csp.feat[3:4])
     #if features are to be log-transformed, turn off centering and scaling
-    if ( eval(args.csp$logtransform) ) args.fit = modifyList( args.fit, list(scale=F) )
+    if ( eval( args.csp.feat$logtransform ) & eval( args.csp.feat$approximate ) ) {
+      args.fit = modifyList( args.fit, list(scale=F) )
+    }
   }  
   if ( .is.sliced(data) ) { 
     #unslice back to df
@@ -57,16 +60,14 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
         slice.train = slice[ -indxFolds[[foldnum]] ] #train set
         slice.test = slice[ indxFolds[[foldnum]] ] #test set
         if (CSP) {
-          csp = do.call(CSP.apply, modifyList( args.csp, list(data=slice.train) ))
-          slice.train = data.frame(sample=i, outcome=csp$outcome, csp$features)
-          slice.test = data.frame( sample=i, outcome=outcome[ indxFolds[[foldnum]] ],
-            #project with training set filters
-            do.call(CSP.get_features, modifyList( args.csp.feat, list(data=slice.test, filters=csp$filters) )) )
+          temp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat) #ToDo: add method optionality
+          slice.train = temp$train
+          slice.test = temp$test
         }
         #get the model fit
         fit = do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))$fit
         if (CSP) {
-          fit$csp = csp$filters #add training set CSP filters to fit list
+          fit$csp = temp$CSP$filters #add training set CSP filters to fit list
         }
         fit #return to lapply (slice.fits)
       })
@@ -80,7 +81,9 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
           if (CSP) {
             #transform test set with CSP filters of training set
             testData = do.call(CSP.get_features, modifyList( args.csp.feat, list(data=testData, filters=fit$csp) ))
-            outcome.test = outcome[ indxFolds[[foldnum]] ] #1 value per trial
+            if ( eval(args.csp.feat$approximate) ) {
+              outcome.test = outcome[ indxFolds[[foldnum]] ] #1 value per trial
+            }
           } else if ( "scale" %in% names(fit) ) {
             #scale test set with scaling parameters of training set
             testData = scale(testData[, dataidx], fit$scale$center, fit$scale$scale)
@@ -385,10 +388,13 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
   args.fit = list(...)
   if (CSP) {
     .loadFuncs(CSP=T)
-    args.csp = modifyList( .eval_ellipsis("CSP.apply", ...), list(baseline=NULL) )
+    args.csp = .eval_ellipsis("CSP.apply", ...)
     args.csp.feat = .eval_ellipsis("CSP.get_features", ...)
+    args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.csp.feat[3:4])
     #if features are to be log-transformed, turn off centering and scaling
-    if ( eval(args.csp$logtransform) ) args.fit = modifyList( args.fit, list(scale=F) )
+    if ( eval( args.csp.feat$logtransform ) & eval( args.csp.feat$approximate ) ) {
+      args.fit = modifyList( args.fit, list(scale=F) )
+    }
   }
   #evaluate data, get outcome
   Data.true = data.permute_labels(data, shuffle=F)
@@ -423,12 +429,9 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         slice.test = lapply( test, function(d) na.omit( d[ sliceidx, ] ) )
         if (CSP) {
           #transform slice data into CSP features
-          csp = do.call(CSP.apply, modifyList( args.csp, list(data=slice.train) ))
-          slice.train = data.frame( sample=i, outcome=csp$outcome, csp$features )
-          slice.test = data.frame( sample=i, outcome=sapply( slice.test, "[[", 1, 2 ),
-                                   do.call(CSP.get_features, #project with training set filters
-                                           modifyList( args.csp.feat, list(data=slice.test, filters=csp$filters) )) )
-                                   
+          csp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat) #ToDo: add method optionality
+          slice.train = csp$train
+          slice.test = csp$test            
         }
         do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))
       }), paste0("slice",slicenums) )
