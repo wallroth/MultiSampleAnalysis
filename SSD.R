@@ -159,6 +159,8 @@ SSD.apply <- function(SSDdata) {
   #W_SSD: spatial filters, demixing matrix W
   #A_SSD: activation patterns, mixing matrix A
   #X_SSD: SSD components, obtained by X*W (component space!)
+  #D_SSD: eigenvalues of the SSD components a.k.a. the power ratio corresponding
+  #       to the components (ordered like the components)
   source("myFuncs.R")
   .eval_package("geigen")
   Xs = SSDdata[[1]][, is.datacol(SSDdata[[1]])]
@@ -215,10 +217,10 @@ SSD.apply <- function(SSDdata) {
 
   #patterns = Covariance of data * weights * inverse of covariance matrix of extracted sources
   A = C %*% W  %*% solve((t(W) %*% C %*% W)) #pattern matrix
-  return(list(W_SSD=W, A_SSD=A, X_SSD=as.data.frame(X_SSD)))
+  return( list(W_SSD=W, A_SSD=A, X_SSD=as.data.frame(X_SSD), D_SSD=D) )
 }
 
-SSD.denoise <- function(Xs, A, k, W=diag( ncol(A) )) {
+SSD.denoise <- function(Xs, A, k=ncol(A), W=diag( ncol(A) )) {
   ## low-rank factorization to denoise measurements with SSD filters: X*W*A'
   ## necessary if subsequent analyses should be performed in original input space
   ## e.g. to interpret topographies (cf. Haufe et al., 2014)
@@ -229,22 +231,22 @@ SSD.denoise <- function(Xs, A, k, W=diag( ncol(A) )) {
   #W: filter matrix, e.g. as obtained from SSD, defaults to identitity matrix.
   #   only required if Xs is not components but some bandpass filtered signal
   #A: pattern matrix, e.g. as obtained from SSD
-  #k: rank to approximate, < ncol(X)
+  #k: rank to approximate, < ncol(X); if = ncol(X), just a projection
   #NOTES ---
   #X*W*A^T = X*W*W^-T = X*I
   #RETURNS ---
   #denoised data (original sensor space!)
   Xs = data.check(Xs, aslist=F) #in case Xs did not come from SSD.get_SigNoise
   X = as.matrix( Xs[,is.datacol(Xs)] )
-  if (k >= ncol(X)) {
-    stop( "Rank k has to be lower than the columns containing measurements in X." )
+  if (k > ncol(X)) {
+    stop( "Rank k cannot be larger than the columns containing measurements in X." )
   }  
   X_denoised = X %*% W[,1:k] %*% t(A[,1:k])
-  return( cbind( Xs[,!is.datacol(Xs)], X_denoised ) )
+  return( data.frame( Xs[,!is.datacol(Xs)], X_denoised ) )
 }
 
 
-SPoC.apply <- function(data, W_SSD = NULL) {
+SPoC.apply <- function(data, outcome, npattern=NULL, k=NULL, baseline=NULL, ...) {
   ## Source Power Correlation Analysis, cf. Dähne et al. 2014
   ## Optimizes SSD filters so that covariance with target variable is maximal
   ## analogous to CSP but with continuous outcome
@@ -252,22 +254,39 @@ SPoC.apply <- function(data, W_SSD = NULL) {
   ## general idea: find a spatial filter that extracts an oscillatory signal whose
   ## power correlates with a given (continuous) target variable
   #INPUT ---
-  #data: SSD components (X_SSD), continuous df or list of trials, 
-  # 1st col with sample number, 2nd col with outcome
-  #W_SSD: if data is SSD components, W_SSD is needed to map SPoC filters into original space
-  #       W_SPoC will then be projected with W = W_SSD %*% W_SPoC and A = W %*% C
-  #       components can be obtained with data %*% W and features with SPoC.get_features(data, W)
+  #data: SSD output, continuous data or list of trials, 1st col with sample number
+  #outcome: continuous outcome vector with elements corresponding to the number of trials
+  #npattern: the first/last n SPoC filters to use for feature generation
+  #k: if SSD output is supplied, k is the number of components used for low-rank factorization 
+  #baseline: define last sample of baseline (if any) so that it will be excluded 
+  #          for the SPoC procedure. If Null, no samples are removed.  
   #RETURNS ---
   #W_SPoC: spatial filters, demixing matrix W
   #A_SPoC: activation patterns, mixing matrix A
-  #if W_SSD is not supplied, data is assumed to be measurements and the output will include:
   #X_SPoC: SPoC components, obtained by X*W
-  #features: trial-wise variance of SPoC-components
-  
-  #target (z) is scaled to zero mean and unit variance (sensible for continuous variables)
+  #D_SPoC: eigenvalues (lambda) of SPoC components, the power correlations
+  #features: trial-wise (log)variance of SPoC-components
+  if ( !is.numeric(outcome) ) {
+    stop( "Outcome must be numeric." )
+  }
+  if ( sum( grepl("SSD", names(data)) ) >= 3 ) { #SSD output with at least X, W, A
+    SSD = list( W=data$W_SSD, A=data$A_SSD ) #save SSD filters and patterns
+    if (is.null(k)) k = ncol(SSD$A) #no denoising
+    data = SSD.denoise(data$X_SSD, k=k, A=SSD$A) #project to original measurement space
+    #infer sample numbers from outcome length (num trials)
+    data = data.append_info(data, trials=length(outcome))
+  }
   data = data.check(data, aslist=F)
+  if ( (nrow(data)/length(outcome)) %% 1 > 0 ) {
+    warning( "Number of outcomes does not seem to match the number of trials or your trials vary in length." )
+  }
+  #remove baseline for SPoC procedure
+  if ( !is.null(baseline) ) {
+    data = data.trials.remove_samples(data, end=baseline)
+  }
   nsamples = data.get_samplenum(data)
-  z = scale( data[ seq(1, nrow(data), nsamples), 2] ) #z same length as trials
+  #get the outcome z, scaled to zero mean and unit variance (sensible for continuous variables)
+  z = scale( outcome ) #z same length as trials
   trialdata = data.trials.split(data, strip=T) #transform to list
   #z is approximated in each trial by the variance of X
   #which is equal to W' * C(t) * W
@@ -284,34 +303,43 @@ SPoC.apply <- function(data, W_SSD = NULL) {
   #Cz needs to be whitened to make the generalized eigenvalue problem into an ordinary one
   VD = eigen(C); V = VD$vectors; d = VD$values
   r = sum(d > 10^-6*d[1]) #rank
-  if (r < ncol(C)) {
+  if (r < ncol(C) & is.null(k)) {
     warning( paste("Matrix does not have full rank, i.e.", ncol(C)-r+1 ,"columns are collinear.",
                    "Computing only",r,"components.") )   
   }
-  M = V[,1:r]  %*% diag(d[1:r]^-0.5) #might not be full-rank if X is not SSD components
+  M = V[,1:r]  %*% diag(d[1:r]^-0.5) #might not be full-rank
   Cz_white = t(M) %*% Cz %*% M
   #now the ordinary eigenvalue decomposition:
   WD = eigen(Cz_white); W = WD$vectors; d = WD$values
-  W = M %*% W #project back to original (un-whitened) channel/SSD space
+  W = M %*% W #project back to original (un-whitened) channel space
   
   #scale eigenvectors to unit variance since eigenvector scaling is arbitrary and not unique:
   W = apply(W, 2, function(w) { w/sqrt(t(w) %*% C %*% w) }) #does nothing if already unit variance
   A = C %*% W  %*% solve((t(W) %*% C %*% W)) #pattern matrix
   
-  #if data were SSD components, change W and A to be applicable to original measurements:
-  if ( !is.null(W_SSD) ) {
-    #map filters from SSD space to original space of data
-    W = W_SSD %*% W 
-    A = W %*% C #pattern matrix
-    return( list(W_SPoC=W, A_SPoC=A) )
-  } 
-  #compute SPoC components if measurements were supplied
-  X_SPoC = as.matrix( data[, is.datacol(data)] ) %*% W
-  features = SPoC.get_features(trialdata, W)
-  return(list(W_SPoC=W, A_SPoC=A, X_SPoC=X_SPoC, features=features))
+#   #if data were SSD components, change W and A to be applicable to original measurements:
+#   if ( !is.null(W_SSD) ) {
+#     #map filters from SSD space to original space of data
+#     W = SSD$W %*% W 
+#     A = SSD$A %*% A
+#   } 
+  if (is.null(npattern)) {
+    if (is.null(k)) {
+      npattern = floor( ncol(W)/4 )
+    } else {
+      npattern = floor(k/2)
+    }
+  }
+  filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
+  patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
+  lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))]
+  #compute SPoC features/components
+  args.in = .eval_ellipsis("SPoC.get_features", ...)
+  features = do.call(SPoC.get_features, modifyList( args.in, list(data=trialdata, filters=filters) ))
+  return(list(filters=filters, patterns=patterns, lambda=lambda, features=features))
 }
 
-SPoC.get_features <- function(data, W, n=ncol(W)) {
+SPoC.get_features <- function(data, filters, approximate=T, logtransform=T) {
   ## backward model W'*x(n) = s(n) -> project data onto spatial filters and extract variance
   # the idea here is to weight/filter channels that contain signal+noise so that
   # hopefully only the signal of interest will be left, cf. Haufe et al. 2014, p.98
@@ -319,11 +347,23 @@ SPoC.get_features <- function(data, W, n=ncol(W)) {
   # i.e. with respect to an external target variable
   #INPUT ---
   #data: can be continuous or trial format
-  #W: spatial filters obtained from SSD/SPoC
-  #n: project only to a reduced number of components (sorted for SSD/SPoC)
-  trialdata = data.check(data, aslist=T, strip=T) #transform to list
-  return(t(sapply(trialdata, function(trial) apply(as.matrix(trial) %*% W[,1:n], 2, var))))
-  #this variance equals w' * C * w
+  #filters: spatial filters obtained from SPoC
+  #approximate: if True, the variance per trial is computed to
+  #             approximate band power
+  #             otherwise, the components are returned  
+  #logtransform: if True, variance is logtransformed
+  trialdata = data.check(data, aslist=T, strip=T)
+  if (approximate) { 
+    #variance per trial
+    features = t(sapply(trialdata, function(td) apply(as.matrix(td) %*% filters, 2, var)))
+    if (logtransform) { 
+      features = log(features)
+    }
+    return(features)
+  }
+  #components
+  features = plyr::rbind.fill.matrix( lapply(trialdata, function(td) as.matrix(td) %*% filters) )
+  return(features)
 }
 
 
