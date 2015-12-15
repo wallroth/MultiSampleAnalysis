@@ -113,7 +113,7 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
   csp = do.call(methodStr, modifyList( args.csp, list(data=train) ))
   trainData = data.frame(train.n, train.outcome, csp$features)
   testData = data.frame(test.n, test.outcome,
-      do.call(CSP.get_features, modifyList( args.feat, list(data=fold$test, filters=csp$filters) )))
+      do.call(CSP.get_features, modifyList( args.feat, list(data=test, filters=csp$filters) )))
   return( list(train=trainData, test=testData, CSP=csp))
 }
 
@@ -146,9 +146,14 @@ CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
   norm.cov <- function(X) {
     return(cov(scale(X, scale=F))) #sample covariance (N-1) on centered data
   }
-  C1 = Reduce("+", lapply(trialdata[target==k[1]], norm.cov)) / length(trialdata[target==k[1]]) #averaged C
-  C2 = Reduce("+", lapply(trialdata[target==k[2]], norm.cov)) / length(trialdata[target==k[2]]) #averaged C
-  #ToDo: add regularization (Lu et al. 2010)
+  if (nsamples > 1) {
+    C1 = Reduce("+", lapply(trialdata[target==k[1]], norm.cov)) / length(trialdata[target==k[1]]) #averaged C
+    C2 = Reduce("+", lapply(trialdata[target==k[2]], norm.cov)) / length(trialdata[target==k[2]]) #averaged C
+    #ToDo: add regularization (Lu et al. 2010)
+  } else {
+    C1 = norm.cov( plyr::rbind.fill( trialdata[target==k[1]] ) )
+    C2 = norm.cov( plyr::rbind.fill( trialdata[target==k[2]] ) )
+  }
   
   #do the eigenvalue decomposition on C1+C2
   VD = eigen(C1+C2, symmetric=T); V = VD$vectors; d = VD$values
