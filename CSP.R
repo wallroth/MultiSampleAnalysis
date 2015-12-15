@@ -163,7 +163,9 @@ CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
                    "Computing only",r,"components.") ) 
   }
   if (r < 2*npattern) {
-    stop( paste("Too few components to calculate", 2*npattern, "filters.") )
+    warning( paste("Too few data columns to calculate", 2*npattern, "filters.",
+                   "Computing", 2*floor(r/2), "instead." ) )
+    npattern = floor(r/2)
   }
   #whiten C1+C2 via matrix P, such that P * (C1+C2) * P' = I
   P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
@@ -376,7 +378,7 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2),
       A = Sigma[[1]] %*% W  %*% solve((t(W) %*% Sigma[[1]] %*% W)) #patterns
       
       #top eigenvalue per class:
-      lambda = c(lambda$x[1], lambda$x[r]) #min, max
+      lambda = data.frame(min=lambda$x[1], max=lambda$x[r]) #min, max
       #retain npattern eigenvectors & -values for each class
       W = list(W[,1:npattern], W[,(ncol(W)-npattern+1):ncol(W)]) #filters W
       P = list(A[,1:npattern], A[,(ncol(A)-npattern+1):ncol(A)]) #patterns P
