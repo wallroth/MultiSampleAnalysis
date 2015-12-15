@@ -141,7 +141,10 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
       return( data.trials.split(data, strip=strip) ) #transform to list 
     }
     if ( strip ) { #even if a list strip non-data cols
-      return( lapply( data, function(d) d[, is.datacol(d)] ) )
+      #FIX: possible misidentification in cases with only 1 sample per trial
+      #obtain datacol info with higher sample number by rebinding temporarily
+      datacols = is.datacol( as.data.frame( data.table::rbindlist(data) ) )
+      return( lapply( data, function(d) d[, datacols] ) )
     }
     return(data) #already a list
   } 
@@ -218,8 +221,8 @@ data.resample <- function(data, old.srate, new.srate) {
   resampled = lapply(data, function(trial) {
     nsamples = data.get_samplenum(trial)
     n = ceiling( nsamples / (old.srate/new.srate) ) #new number of samples
-    as.data.frame(cbind(samples=1:n, outcome=trial[1:n,2], 
-                        sapply( apply(trial[,is.datacol(trial)], 2, approx, n=n), "[[", 2) ))
+    data.frame(samples=1:n, outcome=trial[1:n,2], 
+               sapply( apply(trial[,is.datacol(trial)], 2, approx, n=n), "[[", 2) )
     })
   return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
 }
@@ -245,6 +248,9 @@ data.trials.slice <- function(data, window, overlap=0, split=T) {
   
   data = data.check(data, aslist=F) #transform to df
   nsamples = data.get_samplenum(data)
+  if ( window >= nsamples ) {
+    stop( "Window must be smaller than the number of samples per trial." )
+  }
   #check if overlap makes sense:
   if ( overlap >= window ) {
     stop( "Overlap must be smaller than window or you can't slide across the data." )
