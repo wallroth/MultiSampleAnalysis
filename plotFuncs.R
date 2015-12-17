@@ -357,3 +357,36 @@ decoding.plot_GAT <- function(GATmatrix, timerange=c(-500,2000), onset=T,
   p
 }
 
+data.plot_conditions <- function(data, columns=NULL, cols=NULL, lwd=1) {
+  ## plot measurements but aggregate over trials (separately for outcome)
+  ## conceptually analogous to ERP
+  #columns: measurement channels to average over
+  #cols: optionally specify the colours for each outcome. Necessary if more than 5 outcomes
+  #lwd: line width
+  data = data.check(data, aslist=F)
+  if (is.null(columns)) columns = which( is.datacol(data) )
+  if ( !is.factor(data[,2]) ) data[,2] = as.factor(data[,2])
+  classes = levels(data[,2])
+  if (is.null(cols)) {
+    if ( length(classes) > 5 ) stop("More than 5 distinct outcomes. Please specify colours manually.")
+    cols = c("#0072BD", "#D95319", "#EDB120", "#7E2F8E", "#77AC30")
+  }
+  nsamples = data.get_samplenum(data) #samples per trial
+  target = data[seq(1, nrow(data), nsamples), 2] #outcome
+  trialdata = data.trials.split(data, strip=F) #trial format
+  classdata = lapply( classes, function(cl) {
+    cdat = trialdata[ target == cl ] #all trials for one outcome
+    #compute trial and column average
+    rowMeans( do.call(cbind, lapply(cdat, function(d) rowMeans(d[, columns], na.rm=T))) )
+  })
+  #calculate min max for y axis:
+  temp = do.call(c, classdata)
+  ylims = c( min(temp), max(temp) )
+  plot( classdata[[1]], type="l", las=1, xlab="Sample", ylab="Average", 
+        col=cols[1], lwd=lwd, ylim=ylims )
+  for (i in 2:length(classdata) ) {
+    lines( classdata[[i]], las=1, xlab="Sample", ylab="Average", col=cols[i], lwd=lwd)
+  }
+  legend("bottomleft", classes, col=cols[1:length(classes)],
+         lwd=rep(lwd, length(classes)), bty="n")
+}
