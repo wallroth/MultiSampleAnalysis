@@ -76,7 +76,7 @@ decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), ons
   if (is.null(xlabels)) {
     if (is.null(xticks)) {
       xticks = timepoints
-      xstep = round( xlen/10 ) #stepsize for displayed labels
+      xstep = max(1, round( xlen/10 )) #stepsize for displayed labels
       xidx <- seq(1, xlen, xstep) #xticks with labels
       xlabels <- as.character( timepoints )
       xlabels[-xidx] <- ""
@@ -200,7 +200,7 @@ decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timer
   if (is.null(xlabels)) {
     if (is.null(xticks)) {
       xticks = timepoints
-      xstep = round( xlen/10 ) #stepsize for displayed labels
+      xstep = max(1, round( xlen/10 )) #stepsize for displayed labels
       xidx <- seq(1, xlen, xstep) #xticks with labels
       xlabels <- as.character( timepoints )
       xlabels[-xidx] <- ""
