@@ -48,10 +48,12 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
       args.in = .eval_ellipsis("pipe.SSD", ...)
       SSDout = do.call(pipe.SSD, modifyList( list(...), list(data = data, frequencies = frequencies ) ))
       if ( is.null( args.in$lowrank ) ) { #use SSD components
-        warning( "Using SSD components for subsequent analyses because lowrank is not specified.\n",
-                 "Be careful when interpreting results, some inferences may not be valid (e.g. topographies)." )
-        data = cbind( data[, !is.datacol(data)], SSDout$X_SSD )
-      } else { #use denoised measurements (preferable choice)
+        # set threshold as 75th quantile + 0.1*IQR of power ratio
+        ncomps = sum( SSDout$D_SSD >= 0.1*IQR(SSDout$D_SSD)+quantile(SSDout$D_SSD)[4] )
+        warning( "Argument 'lowrank' is not specified. ", ncomps, " components have been automatically selected." )
+        X_denoised = SSD.denoise(SSDout$X_SSD, SSDout$A_SSD, k=ncomps)
+        data = cbind( data[, !is.datacol(data)], X_denoised )
+      } else { #use denoised measurements
         data = cbind( data[, !is.datacol(data)], SSDout$X_denoised )
       }
       
@@ -70,12 +72,13 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
   foldedData = do.call(data.folds.split, modifyList( args.in, list(data=data) ))
   #method to use:
   methodStr = ifelse( grepl("spec", tolower(method)), "SpecCSP.apply", "CSP.apply" )
-  args.in = .eval_ellipsis(methodStr, ...); args.in[["..."]] = NULL
+  args.csp = .eval_ellipsis(methodStr, ...)
   args.feat = .eval_ellipsis("CSP.get_features", ...)
-  args.in = modifyList(args.in, args.feat[3:4])
+  #insert get_features arguments for CSP function
+  args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.feat[3:4])
   #loop over fold data to create CSP features:
   CSPfolds = lapply(foldedData, function(fold) {
-    .CSP.create_sets(fold$train, fold$test, args.in, args.feat, methodStr=methodStr)
+    .CSP.create_sets(fold$train, fold$test, args.csp, args.feat, method=methodStr)
   })
   #continue fitting ML model to CSP features:
   args.in = list(...)
@@ -90,11 +93,12 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
                ML = CSPfits, CSP = lapply(CSPfolds, "[[", "CSP") ))
 }
 
-.CSP.create_sets <- function(train, test, args.csp, args.feat, methodStr="CSP.apply") {
+.CSP.create_sets <- function(train, test, args.csp, args.feat, method="CSP.apply") {
   ## helper to prepare train and test set with CSP procedure
   #args.csp: arguments to CSP function
   #args.feat: arguments to CSP.get_features function
-  #methodStr: CSP.apply or SpecCSP.apply
+  #NOTE: arguments are called outside to not redundantly execute these calls 
+  #method: CSP.apply or SpecCSP.apply
   #RETURNS ---
   #trainData, testData, CSP output
   train = data.check(train, aslist=F)
@@ -110,7 +114,7 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
     train.n = train[,1]; test.n = test[,1] 
     train.outcome = train[,2]; test.outcome = test[,2]
   }
-  csp = do.call(methodStr, modifyList( args.csp, list(data=train) ))
+  csp = do.call(method, modifyList( args.csp, list(data=train) ))
   trainData = data.frame(train.n, train.outcome, csp$features)
   testData = data.frame(test.n, test.outcome,
       do.call(CSP.get_features, modifyList( args.feat, list(data=test, filters=csp$filters) )))

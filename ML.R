@@ -23,8 +23,14 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   args.fit = list(...)
   if (CSP) {
     .loadFuncs(CSP=T)
-    args.csp = modifyList( .eval_ellipsis("CSP.apply", ...), list(baseline=NULL) )
+    if ( is.null( args.fit$method) ) {
+      method = "CSP.apply"
+    } else {
+      method = ifelse( grepl("spec", tolower(args.fit$method)), "SpecCSP.apply", "CSP.apply" )
+    }    
+    args.csp = modifyList( .eval_ellipsis(method, ...), list(baseline=NULL) )
     args.csp.feat = .eval_ellipsis("CSP.get_features", ...)
+    #insert get_features arguments for CSP function
     args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.csp.feat[3:4])
     #if features are to be log-transformed, turn off centering and scaling
     if ( eval( args.csp.feat$logtransform ) & eval( args.csp.feat$approximate ) ) {
@@ -60,7 +66,7 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
         slice.train = slice[ -indxFolds[[foldnum]] ] #train set
         slice.test = slice[ indxFolds[[foldnum]] ] #test set
         if (CSP) {
-          temp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat) #ToDo: add method optionality
+          temp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat, method)
           slice.train = temp$train
           slice.test = temp$test
         }
@@ -388,8 +394,14 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
   args.fit = list(...)
   if (CSP) {
     .loadFuncs(CSP=T)
-    args.csp = .eval_ellipsis("CSP.apply", ...)
+    if ( is.null( args.fit$method) ) {
+      method = "CSP.apply"
+    } else {
+      method = ifelse( grepl("spec", tolower(args.fit$method)), "SpecCSP.apply", "CSP.apply" )
+    }    
+    args.csp = .eval_ellipsis(method, ...)
     args.csp.feat = .eval_ellipsis("CSP.get_features", ...)
+    #insert get_features arguments for CSP function
     args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.csp.feat[3:4])
     #if features are to be log-transformed, turn off centering and scaling
     if ( eval( args.csp.feat$logtransform ) & eval( args.csp.feat$approximate ) ) {
@@ -429,11 +441,15 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         slice.test = lapply( test, function(d) na.omit( d[ sliceidx, ] ) )
         if (CSP) {
           #transform slice data into CSP features
-          csp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat) #ToDo: add method optionality
+          csp = .CSP.create_sets(slice.train, slice.test, args.csp, args.csp.feat, method)
           slice.train = csp$train
           slice.test = csp$test            
         }
-        do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))
+        fit = do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))
+        if (CSP) {
+          fit$CSP = csp$CSP #add CSP output
+        }
+        fit # return to lapply
       }), paste0("slice",slicenums) )
       return( fits )
     }
