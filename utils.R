@@ -389,6 +389,35 @@ data.collapse_levels <- function(data, labels, col=2) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }  
 
+data.remove_outliers <- function(data, Q=50, IQR=90, C=3) {
+  ## remove trials that are classified as outliers based on variance
+  ## the variance is computed within each trial for each channel,
+  ## then the channel variances are averaged, yielding one value per trial
+  ## finally the trials with global values that exceed the threshold are excluded
+  ## the threshold is defined as: Q + C * IQR
+  if ( any( findInterval( c(Q,IQR), c(0,100) ) != 1 ) ) {
+    stop( "Q and IQR have to be in the range 0 to 100." )
+  }
+  trialdata = data.check(data, aslist=T, strip=T)
+  # compute global variance values
+  trialvar = colMeans( sapply( trialdata, function(trial) apply(trial, 2, var, na.rm=T) ) )
+  # define threshold
+  IQR = c( 0+(100-IQR)/200, 1-(100-IQR)/200 ) #convert IQR values to 0-1 range
+  lims = quantile( trialvar, c(Q/100, IQR) ) #get threshold values
+  threshold = unname( lims[1] + C * (lims[3]-lims[2]) )
+  outliers = which( unname(trialvar > threshold) ) #find trials that exceed global variance threshold
+  print( paste0("Removed ", length(outliers), " outliers (", 
+               length(outliers)/length(trialvar)*100, "% of trials).") )
+  if ( length(outliers) < 1 ) return( list(data = data, removed = 0) )
+  # prepare output:
+  # return data without the outlier trials and info which trials were excluded
+  transf = .transformed #remember
+  trialdata = data.check(data, aslist=T, strip=F) #get trialdata with info columns
+  return( list(data = data.check( trialdata[-outliers], aslist=F, transform=transf ), 
+               removed = outliers) )
+}
+
+
 
 .eval_ellipsis <- function(funStr, ...) {
   ## helper to evaluate input to ellipsis (...) before handing it to a function
