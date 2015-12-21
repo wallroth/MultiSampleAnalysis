@@ -389,7 +389,7 @@ data.collapse_levels <- function(data, labels, col=2) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }  
 
-data.remove_outliers <- function(data, Q=50, IQR=90, C=3) {
+data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   ## remove trials that are classified as outliers based on variance
   ## the variance is computed within each trial for each channel,
   ## then the channel variances are averaged, yielding one value per trial
@@ -408,13 +408,23 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3) {
   outliers = which( unname(trialvar > threshold) ) #find trials that exceed global variance threshold
   print( paste0("Removed ", length(outliers), " outliers (", 
                length(outliers)/length(trialvar)*100, "% of trials).") )
-  if ( length(outliers) < 1 ) return( list(data = data, removed = 0) )
+  if (plot) {
+    #visualize the outliers
+    ylims = c( min( min(trialvar), threshold ), max( max(trialvar), threshold ) )
+    plot(trialvar, xlab="Trial", ylab="Variance", las=1, ylim = ylims)
+    abline(h = threshold, col="red", lty=2)
+    if ( length(outliers) > 0 ) {
+      outlier_labels = rep("", length(trialvar))
+      outlier_labels[outliers] = as.character(outliers)
+      text(trialvar, labels=outlier_labels, cex=.7, pos=4)  
+    }
+  }
+  if ( length(outliers) < 1 ) return( list(data = data, removed = 0, variance=trialvar, threshold=threshold) )
   # prepare output:
   # return data without the outlier trials and info which trials were excluded
-  transf = .transformed #remember
   trialdata = data.check(data, aslist=T, strip=F) #get trialdata with info columns
-  return( list(data = data.check( trialdata[-outliers], aslist=F, transform=transf ), 
-               removed = outliers) )
+  return( list(data = data.check( trialdata[-outliers], aslist=F, transform=.transformed ), 
+               removed = outliers, variance=trialvar, threshold=threshold) )
 }
 
 
