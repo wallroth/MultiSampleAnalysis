@@ -3,6 +3,7 @@
 is.datacol <- function(data, tol = .Machine$double.eps^0.5) {
   ## check if columns of data are measurements (floating numbers)
   ## used to exclude info columns in a df (e.g. sample number, outcome)
+  if ( is.null(dim(data)) ) data = as.matrix(data)
   sapply( 1:ncol(data), function(i) {
     if ( is.numeric( data[,i] ) ) {
       #are there non-integer values in the column?
