@@ -294,8 +294,9 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2),
   data = data.check(data, aslist=F)
   p = p + q
   k = unique(data[,2]) #binary outcome expected in 2nd column
-  if (length(k) != 2) { stop( "Either outcome is not binary or not in the 2nd column." ) }
+  if (length(k) != 2) stop( "Either outcome is not binary or not in the 2nd column." )
   nsamples = data.get_samplenum(data) #samples per trial
+  if ( nsamples <= 1 ) stop( "Cannot compute a frequency with less than 2 samples." )
   target = data[seq(1, nrow(data), nsamples), 2] #outcome
   trialdata = data.trials.split(data, strip=T) #trial format
   cdata = list(trialdata[target==k[1]],
