@@ -50,7 +50,7 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   sx = do.call(data.trials.slice, modifyList( args.slice, list(data=data) ))
   slicenums = unique(sx$splitidx) #number of slices
   data = data.check(data, aslist=T, strip=F) #transform to list if necessary
-  outcome = sapply(data, "[[", 1, 2) #1st value of every trial
+  outcome = as.factor( sapply(data, "[[", 1, 2) ) #1st value of every trial
   dataidx = is.datacol(data[[1]])
   #start GAT procedure
   result = setNames( replicate(numcv, {
@@ -421,10 +421,7 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
   }
   Data.true$data = data.check(Data.true$data, aslist=T, strip=F) #transform to list if necessary
   #evaluation end: data is a list of trials at this point
-  if (CSP & !slice) {
-    stop( "CSP without slicing can be done with more functionalities via pipe.CSP.", 
-          "For this function, please supply sliced data or define a window." )
-  }
+  
   #get indices for slices if requested
   if (slice) {
     sx = do.call(data.trials.slice, modifyList( args.slice, list(data=Data.true$data) ))
@@ -446,8 +443,9 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
           slice.test = csp$test            
         }
         fit = do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))
-        if (CSP) {
-          fit$CSP = csp$CSP #add CSP output
+        if (CSP && verbose) {
+          #add CSP output but without features and outcome to keep the output lean
+          fit$CSP = csp$CSP[!grepl("features|outcome", names(csp$CSP))]
         }
         fit # return to lapply
       }), paste0("slice",slicenums) )
@@ -485,11 +483,23 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         }
       } else {
         #simple fitting procedure on trial data
+        if (CSP) {
+          csp.true = .CSP.create_sets(train.true, test.true, args.csp, args.csp.feat, method)
+          train.true = csp.true$train; test.true = csp.true$test
+          if (permute) {
+            csp.rand = .CSP.create_sets(train.rand, test.rand, args.csp, args.csp.feat, method)
+            train.rand = csp.rand$train; test.rand = csp.rand$test
+          }
+        }
         fits.true = do.call(data.fit_model, modifyList( args.fit, list(trainData=train.true, testData=test.true) ))
         result.true = data.frame(label="true", AUC=fits.true$AUC)
         if (permute) {
           fits.rand = do.call(data.fit_model, modifyList( args.fit, list(trainData=train.rand, testData=test.rand) ))
           result.rand = data.frame(label="rand", AUC=fits.rand$AUC)
+        }
+        if ( verbose && CSP ) {
+          fits.true$CSP = csp.true$CSP[!grepl("features|outcome", names(csp.true$CSP))]
+          if (permute) fits.rand$CSP = csp.rand$CSP[!grepl("features|outcome", names(csp.rand$CSP))]
         }
       }
       out = list(result.true = result.true)
@@ -526,6 +536,35 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
       args.in = modifyList( args.in, list(group="") )
     } 
     out$significance = do.call(decoding.signtest, modifyList( args.in, list(result=out$summary) ))
+  }
+  #if SpecCSP add aggregated alpha per slice 
+  if (verbose && CSP && method=="SpecCSP.apply") {
+    alphas = setNames( lapply( out[ grep("fits", names(out)) ], function(fits) { #true and random
+      if (slice) {
+        slices = names( out$fits.true[[1]][[1]] ) #cv1, fold1
+        setNames( lapply(slices, function(slice) {
+          temp = lapply(fits, function(cv) {
+            Reduce("+", lapply(cv, function(fold) { fold[[slice]]$CSP$alpha }))/k
+          })
+          Reduce("+", temp)/numcv
+        }), slices)
+      } else {
+        temp = lapply(fits, function(cv) {
+          Reduce("+", lapply(cv, function(fold) { fold$CSP$alpha }))/k
+        })
+        Reduce("+", temp)/numcv
+      }
+    }), paste0( "alpha.", substr( names(out[ grep("fits", names(out)) ]), 6, 12) ))
+    out$SpecCSP = alphas
+    if (slice) {
+      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]][[1]]$CSP$bands, 
+                                  freqs = out$fits.true[[1]][[1]][[1]]$CSP$freqs, 
+                                  outcome = unique(out$fits.true[[1]][[1]][[1]]$CSP$outcome))
+    } else {
+      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]]$CSP$bands, 
+                                  freqs = out$fits.true[[1]][[1]]$CSP$freqs, 
+                                  outcome = unique(out$fits.true[[1]][[1]]$CSP$outcome))      
+    }
   }
   return(out)
 }
@@ -669,7 +708,7 @@ data.permute_labels <- function(data, shuffle=T) {
       }
     }
   }
-  return( list(data = data, outcome = outcome) )
+  return( list(data = data, outcome = as.factor(outcome)) )
 }
 
 data.folds.split <- function(data, k=5, shuffle=F) {
@@ -860,6 +899,18 @@ data.fit_model <- function(trainData, testData, model="L2", scale=T, ...) {
   return( list(AUC=acc, CM=cm, fit=fit) )
 }
 
-
-
-
+createSubjFolds <- function(subnum, k) {
+  ## helper to create folds for a list of subject data sets
+  ## caret's createFolds does not properly handle this scenario
+  ## e.g. repeat createFolds(1:20, k=5) a few times
+  #INPUT ---
+  #subnum: number of subjects or vector with sub numbers
+  #k: number of folds
+  #RETURNS: the fold indices
+  subs = unique(subnum)
+  if (length(subnum) == 1) subs = 1:subnum
+  subs = which( subs == subs ) #get indices in case numeric vector was supplied
+  cuts = sample( cut(subs, breaks=k, labels=F, include.lowest=T) )
+  folds = setNames( split(subs, cuts), paste0("Fold",1:k) )
+  return(folds)
+}
