@@ -94,7 +94,7 @@ pipe.SSD <- function(data, ..., plotfreq = T, lowrank = NULL) {
   return(SSDout)
 }
 
-SSD.get_filters <- function(frequencies, transwidth=1, srate=500) {
+SSD.get_filters <- function(frequencies, transwidth=1, srate=500, window="blackman") {
   ## get SSD filter coefficients to be supplied to SSD.get_SigNoise
   #INPUT ---
   #frequencies: 6 (or 2) values in this order:
@@ -119,9 +119,9 @@ SSD.get_filters <- function(frequencies, transwidth=1, srate=500) {
   }
   if (length(frequencies) != 6) { stop( "Incorrect frequency specification!" ) }
   # get filter coefficients (b):
-  Xs_bandpass = filter.get_coeffs(frequencies[1:2], transwidth, ftype="pass", srate=srate)
-  Xn_bandpass = filter.get_coeffs(frequencies[3:4], transwidth, ftype="pass", srate=srate)
-  Xn_bandstop = filter.get_coeffs(frequencies[5:6], transwidth, ftype="stop", srate=srate)
+  Xs_bandpass = filter.get_coeffs(frequencies[1:2], transwidth, ftype="pass", srate=srate, wtype=window)
+  Xn_bandpass = filter.get_coeffs(frequencies[3:4], transwidth, ftype="pass", srate=srate, wtype=window)
+  Xn_bandstop = filter.get_coeffs(frequencies[5:6], transwidth, ftype="stop", srate=srate, wtype=window)
   return(list(Xs_bandpass=Xs_bandpass, 
               Xn_bandpass=Xn_bandpass, 
               Xn_bandstop=Xn_bandstop))

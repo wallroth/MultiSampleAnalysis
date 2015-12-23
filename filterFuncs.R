@@ -1,13 +1,14 @@
 #make helper functions accessible
 source("myFuncs.R")
 
-filter.get_coeffs <- function(frequencies, transwidth, ftype, srate=500) {
+filter.get_coeffs <- function(frequencies, transwidth, ftype, srate=500, wtype="hamming") {
   ## creates Hamming window sinc FIR filter coefficients for the given frequency
   #INPUT ---
   #frequencies: scalar (high/lowpass) or tuple (bandpass/stop) to specifiy freq (range)
   #transwidth: scalar, specifies size of roll-off, freq is at the center of this value
   #         - e.g. 40Hz low-pass: freq 44, transwidth 8, roll-off between 40 and 48
   #ftype: "low", "high", "pass", "stop" filter type
+  #wtype: hamming or blackman window function
   #RETURNS ---
   #b: filter coefficients for use with filter.apply or signal::filter in general
   #Notes ---
@@ -22,15 +23,16 @@ filter.get_coeffs <- function(frequencies, transwidth, ftype, srate=500) {
   #zero-padding replaces necessity of two-pass filtering (filtfilt)
   #upper frequency edge cannot be higher than srate/2 (nyquist frequency)
 
-  #normalized transition widths from Widmann (2015) table p.8 (3.3 for hamming)
-  m = ceiling(3.3/(transwidth/srate)/2)*2 #filter order
+  #normalized transition widths from Widmann (2015) table p.8
+  deltaF = ifelse( tolower(wtype) == "blackman", 5.5, 3.3 ) #blackman: 5.5, hamming: 3.3
+  m = ceiling(deltaF/(transwidth/srate)/2)*2 #filter order
   #transform frequencies to range [0,1] where 1 corresponds to nyquist freq (srate/2):
   f = frequencies/(srate/2) 
   
   #fir1 sets transition zones to 0 and smoothes afterwards with windowing
   # b = fir1(m, f, type=ftype, window=hamming(m+1), scale=T)
   #using firws import (Widman) instead of fir1
-  b = .firfilt.firws(m, f, type=ftype)
+  b = .firfilt.firws(m, f, type=ftype, window=wtype)
   return(b)
 }
 
@@ -81,13 +83,6 @@ filter.apply <- function(data, b) {
 }
 
 
-# erpsignal <- function(data) {
-#   #expects data with first row containing sample number
-#   temp = split(data, data[,1])
-#   return(as.data.frame(t(sapply(temp, colMeans))))
-# }
-
-
 data.freq_response <- function(data, cols=NULL, srate=500, 
                                xlims=NULL, filt=F, title="") {
   ## plots the averaged frequency response for all measurement columns
@@ -135,16 +130,21 @@ data.freq_response <- function(data, cols=NULL, srate=500,
 ############# copied firfilt (Widmann) Matlab functions #############
 
 #Widman recommends 0.002-0.001 passband ripple (-27 - -30dB) & -54 to -60 dB stopband attenuation
-.firfilt.firws <- function(m, freq, type) {
+.firfilt.firws <- function(m, freq, type, window) {
   ## firws creates the filter coefficients b
   #f as nyquist freq: range=[0 1]
-  #window automatically set to hamming
   #type options: "high", "low", "pass", "stop"
-  firfilt.hamming <- function(m) {
-    #hamming window coefficients, copied from firfilt/windows.m
-    a = 25/46
+  #window: automatically set to hamming, optionally blackman
+  firfilt.windows <- function(m, window) {
+    #compute window coefficients, copied from firfilt/windows.m
     m = seq(0, 1, by=1/(m-1))
-    w = a - (1 - a) * cos(2 * pi * m)
+    if ( tolower(window) == "blackman" ) {
+      a = c(.42, .5, .08, 0)
+      w = a[1] - a[2] * cos(2 * pi * m) + a[3] * cos(4 * pi * m) - a[4] * cos(6 * pi * m)
+    } else { #hamming 
+      a = 25/46
+      w = a - (1 - a) * cos(2 * pi * m)
+    }
     return(w)
   }
   
@@ -166,7 +166,7 @@ data.freq_response <- function(data, cols=NULL, srate=500,
   }
   
   #actual firws function:
-  w = firfilt.hamming(m+1)
+  w = firfilt.windows(m+1, window)
   f = freq/2 
   b = firfilt.fkernel(m, f[1], w)
   if (length(f) == 1 & type == "high") {
