@@ -329,7 +329,28 @@ decoding.SS.parallel <- function(data, nCores=NULL, ...) {
   ## close parallel backend
   .parallel_backend(on=F, CPUcluster)
   #prepare and return output
-  return( .output.prepare(SSres, "subject") )
+  out = .output.prepare(SSres, "subject")
+  #if SpecCSP was used, average the alphas for all subjects
+  if ( "fits.SpecCSP" %in% names(out) ) {
+    temp = list( true = lapply( out$fits.SpecCSP, "[[", "alpha.true" ) ) #true alphas for all subs
+    if ( "alpha.random" %in% names(out$fits.SpecCSP[[1]]) ) {
+      temp$rand = lapply( out$fits.SpecCSP, "[[", "alpha.random" ) #random alphas for all subs
+    }
+    sliced = class( temp$true[[1]] ) == "list" #slice list
+    specout = setNames( lapply( temp, function(alpha) {
+      if (sliced) {
+        slices = names( alpha[[1]] ) #sub1
+        setNames( lapply(slices, function(slice) {
+          Reduce("+", lapply(alpha, "[[", slice))/length(alpha)
+        }), slices)
+      } else {
+        Reduce("+", alpha)/length(alpha)
+      }
+    }), paste0( "alpha.", names(temp)) )
+    specout$settings = out$fits.SpecCSP[[1]]$settings
+    out$fits.SpecCSP = append(out$fits.SpecCSP, list(overall=specout), after=0 )
+  }
+  return(out)
 }
 
 .output.prepare <- function(output, newStr = "subject") {
@@ -559,11 +580,11 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
     if (slice) {
       out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]][[1]]$CSP$bands, 
                                   freqs = out$fits.true[[1]][[1]][[1]]$CSP$freqs, 
-                                  outcome = unique(out$fits.true[[1]][[1]][[1]]$CSP$outcome))
+                                  outcome = levels(Data.true$outcome))
     } else {
       out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]]$CSP$bands, 
                                   freqs = out$fits.true[[1]][[1]]$CSP$freqs, 
-                                  outcome = unique(out$fits.true[[1]][[1]]$CSP$outcome))      
+                                  outcome = levels(Data.true$outcome))      
     }
   }
   return(out)
