@@ -161,27 +161,35 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
   return( as.data.frame(data) ) #df or matrix/vector to df
 }
 
-data.trials.demean <- function(data, end, start=1) {
+data.trials.normalize <- function(data, start=NULL, end=NULL, scale=F) {
   ## remove the mean of a range of data points from the other samples of a trial
   ## generally used to subtract the average of a baseline period, i.e. 1:baseline_end
   #INPUT ---
   #data: continuous df or list of trials, returns data in the same format
-  #end: last sample of the baseline (range to subtract)
-  #start: first sample of the baseline, defaults to first sample of the trial
-  
+  #start: first sample of the range to subtract, defaults to first sample of the trial
+  #end: last sample of the range, defaults to last sample of the trial
+  #scale: if True, data is both centered and scaled, otherwise only centered
   data = data.check(data, aslist=T, strip=F) #transform to list
+  nsamples = data.get_samplenum(data[[1]])
+  if ( is.null(start) || start < 1 ) start = 1
+  if ( is.null(end) || end > nsamples ) end = nsamples
+  dcol = is.datacol(data[[1]])
   normdata = lapply(data, function(trial) {
-    dcol = is.datacol(trial)
-    baseline = scale(trial[start:end, dcol], scale=F)
-    demeaned = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
-                     attr(baseline,"scaled:center"), scale=F)
-    temp = cbind(trial[, !dcol], rbind( demeaned[0:(start-1),,drop=F], baseline, 
-                                        demeaned[start:nrow(demeaned),,drop=F] ) ) 
-    if ( sum(dcol) == 1 ) {
-      #to prevent command as col name in case of single column data:
-      names(temp)[is.datacol(temp)] = names(trial)[dcol]
+    normalized = scale(trial[start:end, dcol], scale=scale)
+    if ( !identical(end, nsamples) ) {
+      #normalize only via a baseline
+      if (scale) {
+        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
+                     attr(normalized,"scaled:center"), attr(normalized,"scaled:scale"))
+      } else {
+        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
+                     attr(normalized,"scaled:center"), scale=F)
+      }
+      normalized =  rbind( temp[0:(start-1), , drop=F], #pre-baseline samples
+                           normalized, #baseline samples
+                           temp[start:nrow(temp), , drop=F] ) #post-baseline samples
     }
-    temp #return to lapply
+    setNames( data.frame( trial[, !dcol], normalized ), names(trial) ) #return to lapply
   })
   return( data.check(normdata, aslist=F, transform=.transformed) ) #transform back to df if needed
 }
