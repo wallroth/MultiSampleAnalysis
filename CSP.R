@@ -268,7 +268,7 @@ CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
   return("Done.")
 }
 
-SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2), 
+SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=NULL, 
                           steps=3, srate=500, ...) {
   ##Spectrally weighted CSP, cf. Tomioka et al. 2006
   ##if frequency band is unknown, this algorithm tries to do simultaneous
@@ -279,7 +279,7 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2),
   #npattern: number of CSP weights per class (W ncol = 2*npattern)
   #p: regularization parameter, seq(-1,1,by=0.5) = scaling exponent (see below)
   #q: regularization parameter, seq(0,4,by=0.5) = discriminability (see below)
-  #prior: frequency band to search in
+  #prior: frequency band to search in, defaults to the full spectrum
   #steps: number of iterations
   #srate: sampling rate of the data
   ## see Tomioka paper page 16, figure 6 for some light on the parameters q and p
@@ -292,6 +292,7 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=c(1,srate/2),
   #the theoretical filter optimum with p=-1 is better (sets beta to 1 each iteration), 
   #or more generally: p < 0 if little prior knowledge is at hand (note: p also depends on q!)
   data = data.check(data, aslist=F)
+  if ( is.null(prior) ) prior = c(0, srate/2)
   p = p + q
   k = unique(data[,2]) #binary outcome expected in 2nd column
   if (length(k) != 2) stop( "Either outcome is not binary or not in the 2nd column." )
