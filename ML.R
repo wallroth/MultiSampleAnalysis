@@ -3,6 +3,116 @@
 #make helper functions accessible
 source("myFuncs.R")
 
+data.fit_test <- function(data, fit, slice=F, ...) {
+  ## a function to evaluate a model fit on "new" data, i.e. a validation or test set
+  ## fit is the result of a fitting procedure, e.g. decoding.SS or data.fit_model
+  ## it will be used to predict the outcome that is in the 2nd column of data
+  ## if fit is a list of slice fits, the data should either be sliced as well
+  ## or the appropriate slicing parameters have to be provided (with slice = T)
+  ## if CSP was used to create the fit, provide the arguments approximate/logtransform
+  ## in case they differed from their defaults
+  #INPUT ---
+  #data: data frame, list of trials or slices
+  #fit: either directly a model fit or the output of decoding.SS / data.fit_model
+  #     if fit was "manually" created make sure scale/CSP are included if applicable
+  #slice: if True, fit is a list of fits corresponding to slices and data will be 
+  #       sliced according to the supplied window/overlap parameters
+  #... : further arguments correspond to slicing and CSP feature settings if applicable
+  #OUTPUT ---
+  #a list: if no slicing, the output directly mimicks data.fit_model
+  #        otherwise a list with elements "summary" and "fits"
+  
+  #evaluate different types of fit input
+  if ( "fit" %in% names(fit) ) { #input directly from data.fit_model
+    fit = fit$fit 
+  } else {
+    if ( any( grepl("fits", names(fit)) ) ) { #multiple fits
+      temp = fit[[ which( grepl("fits", names(fit)) )[1] ]] #if true/random fits, take the first
+    } else if ( class(fit) == "list" ) { 
+      #perhaps a sub element was input so no "fits" name present
+      temp = fit
+    }
+    if (slice || .is.sliced(data) ) {
+      #find the slice fits
+      while ( !all( grepl("slice", names(temp)) ) ) {
+        temp = temp[[1]] #if numcv/folds, take first CV
+      }
+      fit = temp #list of slice fits
+    } else {
+      #find the fit
+      while ( !"fit" %in% names(temp) ) {
+        temp = temp[[1]] #if numcv/folds, take first CV
+      }
+      fit = temp$fit #single fit
+    }
+  } # "else" fit is already a model fit, e.g. of class LiblineaR or lda
+  
+  #evaluate function arguments
+  args.slice = .eval_ellipsis("data.trials.slice", ...)
+  args.slice$split = F #save RAM
+  .loadFuncs(CSP=T)
+  args.csp.feat = .eval_ellipsis("CSP.get_features", ...)
+  #evaluate data
+  if ( .is.sliced(data) ) {
+    #unslice back to df
+    data = .data.unslice(data, params.out=T)
+    if (!slice) { #save settings if no new slice request was made on function call
+      slice = T 
+      args.slice = modifyList( args.slice, list(window=data$window, overlap=data$overlap) )
+    }
+    data = data$data
+  }
+  data = data.check(data, aslist=T, strip=F) #transform to list if necessary
+  #evaluation end: data is a list of trials at this point 
+  
+  ## create prediction function ##
+  get_predictions <- function(data, fit) {
+    #internal helper function
+    data = data.check(data, aslist=F)
+    if ( !is.factor(data[,2]) ) data[,2] = as.factor(data[,2])
+    if ( "CSP" %in% names( fit ) ) {
+      if ( eval(args.csp.feat$approximate) ) { #1 value per trial
+        nsamples = data.get_samplenum(data) 
+        outcome = data[ seq(1, nrow(data), nsamples), 2]
+        n = 1:length(outcome)
+      } else { #dimensionality is the same as before
+        n = data[,1]
+        outcome = data[,2]
+      }
+      data = data.frame(n, outcome, do.call(CSP.get_features, 
+                 modifyList( args.csp.feat, list(data=data, filters=fit$CSP$filters) )))
+    }
+    if ( "scale" %in% names( fit ) ) {
+      data = cbind( data[, !is.datacol(data)], 
+                    scale( data[, is.datacol(data)], 
+                           center = fit$scale$center, 
+                           scale = fit$scale$scale) )
+    }
+    #get predictions
+    preds <- predict( fit, data[, is.datacol(data)] )
+    cm = caret::confusionMatrix( preds[[1]], data[,2] )
+    acc = AUC::auc( AUC::roc( preds[[1]], data[,2] ) )
+    return( list(AUC=acc, CM=cm, fit=fit) )
+  }
+  
+  ## start fit evaluation ##
+  if (slice) {
+    # iterate over the slices and obtain predictions
+    sx = do.call(data.trials.slice, modifyList( args.slice, list(data=data) ))
+    slicenums = unique(sx$splitidx) #number of slices
+    fits = setNames( lapply( slicenums, function(i) { #iterate slices
+      sliceidx = sx$slides[sx$splitidx == i][1:(args.slice$window)]
+      slice.data = lapply( data, function(d) na.omit( d[ sliceidx, ] ) ) #imbalanced slices generate NAs
+      get_predictions(slice.data, fit[[i]]$fit) # return to lapply
+    }), paste0("slice",slicenums) )
+    out = list( summary = data.frame(slice=1:length(fits), 
+                    AUC = sapply(fits, "[[", "AUC"), row.names=NULL), fits = fits)
+  } else { #single fit
+    out = get_predictions(data, fit)
+  }
+  return(out)
+}
+
 decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   ## Generalization across time: how long stays a process active, how many are there
   ## train model at one time point and test prediction accuracy on all other time points
@@ -13,7 +123,7 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   #data: data frame or list of trials
   #slice: if True, slice trial data according to window/overlap,
   #       else data is expected to be sliced. Otherwise GAT is meaningless.
-  #CSP: if True, decode with logvar of CSP components per slice
+  #CSP: if True, apply CSP per slice and use CSP features to decode
   #     note: it is recommended to band-pass filter the data for CSP
   if ( !slice & !.is.sliced(data) ) stop( "Data must be sliced for GAT to be meaningful." )
   .eval_package("caret")
@@ -51,7 +161,6 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   slicenums = unique(sx$splitidx) #number of slices
   data = data.check(data, aslist=T, strip=F) #transform to list if necessary
   outcome = as.factor( sapply(data, "[[", 1, 2) ) #1st value of every trial
-  dataidx = is.datacol(data[[1]])
   #start GAT procedure
   result = setNames( replicate(numcv, {
     ## To reduce RAM demands, grab data only as needed ##
@@ -73,7 +182,7 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
         #get the model fit
         fit = do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))$fit
         if (CSP) {
-          fit$csp = temp$CSP$filters #add training set CSP filters to fit list
+          fit$CSP = temp$CSP[!grepl("features|outcome", names(temp$CSP))]
         }
         fit #return to lapply (slice.fits)
       })
@@ -86,20 +195,17 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
           outcome.test = testData[,2] #1 value per sample
           if (CSP) {
             #transform test set with CSP filters of training set
-            testData = do.call(CSP.get_features, modifyList( args.csp.feat, list(data=testData, filters=fit$csp) ))
+            testData = do.call(CSP.get_features, modifyList( args.csp.feat, list(data=testData, filters=fit$CSP$filters) ))
             if ( eval(args.csp.feat$approximate) ) {
               outcome.test = outcome[ indxFolds[[foldnum]] ] #1 value per trial
             }
-          } else if ( "scale" %in% names(fit) ) {
+          } 
+          if ( "scale" %in% names(fit) ) {
             #scale test set with scaling parameters of training set
-            testData = scale(testData[, dataidx], fit$scale$center, fit$scale$scale)
-          } else { # no scaling
-            testData = testData[, dataidx]
+            testData = scale(testData[, is.datacol(testData)], fit$scale$center, fit$scale$scale)
           }
-          preds = predict( fit, testData )
-          if ( !is.factor(outcome.test) ) {
-            outcome.test = as.factor(outcome.test)
-          }
+          if ( !is.factor(outcome.test) ) outcome.test = as.factor(outcome.test)
+          preds = predict( fit, testData[, is.datacol(testData)] )
           cm = caret::confusionMatrix( preds[[1]], outcome.test )
           acc = AUC::auc( AUC::roc( preds[[1]], outcome.test ) )
           list(AUC=acc, CM=cm, fit=fit) #the fits are added redundantly
@@ -425,8 +531,18 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
     #insert get_features arguments for CSP function
     args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.csp.feat[3:4])
     #if features are to be log-transformed, turn off centering and scaling
-    if ( eval( args.csp.feat$logtransform ) & eval( args.csp.feat$approximate ) ) {
+    if ( eval( args.csp.feat$logtransform ) && eval( args.csp.feat$approximate ) ) {
       args.fit = modifyList( args.fit, list(scale=F) )
+    }
+  }
+  #ensure legitimate values for k and numcv
+  k = as.integer(k); numcv = as.integer(numcv)
+  if ( numcv < 1 ) numcv = 1L
+  if ( k <= 1 ) {
+    k = 1L
+    if ( numcv > 1 ) {
+      numcv = 1L
+      warning( "Repetitions are meaningless without a fold-split. Setting numcv to 1." )
     }
   }
   #evaluate data, get outcome
@@ -465,8 +581,8 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         }
         fit = do.call(data.fit_model, modifyList( args.fit, list(trainData=slice.train, testData=slice.test) ))
         if (CSP && verbose) {
-          #add CSP output but without features and outcome to keep the output lean
-          fit$CSP = csp$CSP[!grepl("features|outcome", names(csp$CSP))]
+          #add CSP output to fit but without features and outcome to keep the output lean
+          fit$fit$CSP = csp$CSP[!grepl("features|outcome", names(csp$CSP))]
         }
         fit # return to lapply
       }), paste0("slice",slicenums) )
@@ -495,6 +611,10 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         train.rand = Data.rand$data[ -indxFolds.rand[[foldnum]] ]
         test.rand = Data.rand$data[ indxFolds.rand[[foldnum]] ]
       }
+      if ( k == 1 ) { #no CV
+        train.true = test.true #training set and test set are the same
+        if (permute) train.rand = test.rand
+      }
       if (slice) {
         fits.true = slice.fitting(train.true, test.true)
         result.true = data.frame( label="true", slice=slicenums, AUC=sapply(fits.true, "[[", 1) )
@@ -519,8 +639,9 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
           result.rand = data.frame(label="rand", AUC=fits.rand$AUC)
         }
         if ( verbose && CSP ) {
-          fits.true$CSP = csp.true$CSP[!grepl("features|outcome", names(csp.true$CSP))]
-          if (permute) fits.rand$CSP = csp.rand$CSP[!grepl("features|outcome", names(csp.rand$CSP))]
+          #add the important CSP output to fit
+          fits.true$fit$CSP = csp.true$CSP[!grepl("features|outcome", names(csp.true$CSP))]
+          if (permute) fits.rand$fit$CSP = csp.rand$CSP[!grepl("features|outcome", names(csp.rand$CSP))]
         }
       }
       out = list(result.true = result.true)
@@ -548,9 +669,9 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
   ######## FITTING END ########
   
   #finalize output
-  out = .output.prepare(result, "cv")
+  out = .output.prepare(result, "CV")
   #test for significance
-  if (permute) {
+  if (permute && k > 1) {
     args.in = .eval_ellipsis("decoding.signtest", ...)
     if ( !slice ) {
       #simple independent t.test
@@ -565,25 +686,25 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
         slices = names( out$fits.true[[1]][[1]] ) #cv1, fold1
         setNames( lapply(slices, function(slice) {
           temp = lapply(fits, function(cv) {
-            Reduce("+", lapply(cv, function(fold) { fold[[slice]]$CSP$alpha }))/k
+            Reduce("+", lapply(cv, function(fold) { fold[[slice]]$fit$CSP$alpha }))/k
           })
           Reduce("+", temp)/numcv
         }), slices)
       } else {
         temp = lapply(fits, function(cv) {
-          Reduce("+", lapply(cv, function(fold) { fold$CSP$alpha }))/k
+          Reduce("+", lapply(cv, function(fold) { fold$fit$CSP$alpha }))/k
         })
         Reduce("+", temp)/numcv
       }
     }), paste0( "alpha.", substr( names(out[ grep("fits", names(out)) ]), 6, 12) ))
     out$SpecCSP = alphas
     if (slice) {
-      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]][[1]]$CSP$bands, 
-                                  freqs = out$fits.true[[1]][[1]][[1]]$CSP$freqs, 
+      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]][[1]]$fit$CSP$bands, 
+                                  freqs = out$fits.true[[1]][[1]][[1]]$fit$CSP$freqs, 
                                   outcome = levels(Data.true$outcome))
     } else {
-      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]]$CSP$bands, 
-                                  freqs = out$fits.true[[1]][[1]]$CSP$freqs, 
+      out$SpecCSP$settings = list(bands = out$fits.true[[1]][[1]]$fit$CSP$bands, 
+                                  freqs = out$fits.true[[1]][[1]]$fit$CSP$freqs, 
                                   outcome = levels(Data.true$outcome))      
     }
   }
