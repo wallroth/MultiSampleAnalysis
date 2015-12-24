@@ -35,12 +35,14 @@ data.fit_test <- function(data, fit, slice=F, ...) {
     if (slice || .is.sliced(data) ) {
       #find the slice fits
       while ( !all( grepl("slice", names(temp)) ) ) {
+        if ( identical(temp, temp[[1]]) ) stop( "Could not find any fits." )
         temp = temp[[1]] #if numcv/folds, take first CV
       }
       fit = temp #list of slice fits
-    } else {
+    } else if ( class(fit) == "list" ) {
       #find the fit
       while ( !"fit" %in% names(temp) ) {
+        if ( identical(temp, temp[[1]]) ) stop( "Could not find a fit." )
         temp = temp[[1]] #if numcv/folds, take first CV
       }
       fit = temp$fit #single fit
