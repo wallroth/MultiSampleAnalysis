@@ -122,7 +122,7 @@ pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
 }
 
 #CSP paradigm
-CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
+CSP.apply <- function(data, npattern=3, baseline=NULL, features=T, ...) {
   ## main function of the CSP paradigm: applies the spatial filters for feature extraction
   ## features are maximally informative with respect to the contrasted condition
   #INPUT ---
@@ -133,6 +133,7 @@ CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
   #logtransform: should variance features be logtransformed
   #baseline: define last sample of baseline (if any) so that it will be excluded 
   #          for the CSP procedure. If Null, no samples are removed.
+  #features: if T, features are computed and returned
   data = data.check(data, aslist=F)
   k = unique(data[,2]) #binary outcome expected in 2nd column
   if (length(k) != 2) { stop( "Either outcome is not binary or not in the 2nd column." ) }
@@ -200,7 +201,11 @@ CSP.apply <- function(data, npattern=3, baseline=NULL, ...) {
   filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
   patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
   
-  #extract log-variance features according to CSP:
+  if (!features) {
+    return(list(filters=filters, 
+                patterns=patterns))
+  } #else...
+  #extract (log-variance) features according to CSP:
   #original signal is projected via filters: linear mapping so that the variance of the... 
   #reduced feature space is maximally informative regarding the contrast
   #each projection captures a different spatial localization
@@ -235,6 +240,37 @@ CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
   #components
   features = plyr::rbind.fill.matrix( lapply(trialdata, function(td) as.matrix(td) %*% filters) )
   return(features)
+}
+
+CSP.Multiclass.apply <- function(data, ...) {
+  ## Multiclass extension to CSP using OVR (one vs. rest) approach, cf. Dornhege et al. 2004
+  ## input is the same as for CSP but data contains more than 2 unique classes
+  ## the resulting filters/patterns are the result of a per-class comparison against the others
+  ## whose filters/patterns (each 2*npattern) were column-bound and ordered for the classes
+  args.csp = .eval_ellipsis("CSP.apply", ...)
+  args.feat = .eval_ellipsis("CSP.get_features", ...)
+  args.csp[["..."]] = NULL
+  data = data.check(data, aslist=F)
+  k = unique(data[,2]) #multiclass outcome expected in 2nd column
+  if (length(k) <= 2) { stop( "No multi-class outcome found in the 2nd column." ) }
+  #iterate over the classes to obtain OVR filters
+  OVR = lapply(k, function(class) {
+    #collapse all other classes to one level ("rest")
+    d = data.collapse_levels(data, labels = k[!k %in% class], verbose=F)
+    do.call(CSP.apply, modifyList( args.csp, list(data=d, features=F) ))
+  })
+  #column bind the per class OVR filters and patterns 
+  #order k because otherwise its order will conform to the first appearance in data
+  filters = do.call(cbind, lapply(OVR[ order(k) ], "[[", "filters"))
+  patterns = do.call(cbind, lapply(OVR[ order(k) ], "[[", "patterns"))
+  #get features and outcome
+  features = do.call(CSP.get_features, modifyList( args.feat, list(data=data, filters=filters) ))
+  nsamples = data.get_samplenum(data)
+  target = data[seq(1, nrow(data), nsamples), 2]
+  return(list(outcome=target,
+              features=features, 
+              filters=filters, 
+              patterns=patterns))
 }
 
 # CSP.get_sliced_features <- function(data) {
