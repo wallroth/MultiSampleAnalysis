@@ -163,6 +163,10 @@ decoding.GAT <- function(data, slice=T, numcv=1, CSP=F, verbose=F, ...) {
   slicenums = unique(sx$splitidx) #number of slices
   data = data.check(data, aslist=T, strip=F) #transform to list if necessary
   outcome = as.factor( sapply(data, "[[", 1, 2) ) #1st value of every trial
+  if ( CSP && length( levels(outcome) ) > 2 ) { #more than 2 classes
+    print( "More than 2 classes. Switching to OVR CSP to resolve multiclass problem." )
+    method = "CSP.Multiclass.apply"
+  }
   #start GAT procedure
   result = setNames( replicate(numcv, {
     ## To reduce RAM demands, grab data only as needed ##
@@ -549,6 +553,10 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
   }
   #evaluate data, get outcome
   Data.true = data.permute_labels(data, shuffle=F)
+  if ( CSP && length( levels(Data.true$outcome ) ) > 2 ) { #more than 2 classes
+    print( "More than 2 classes. Switching to OVR CSP to resolve multiclass problem." )
+    method = "CSP.Multiclass.apply"
+  }
   if ( .is.sliced(data) ) {
     #unslice back to df
     temp = .data.unslice(Data.true$data, params.out=T)
@@ -715,7 +723,7 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
 
 decoding.signtest <- function(result, dv="AUC", pair="label", group="slice", 
                           adjust="none", alpha=0.01) {
-  ## does t-tests at all slices for significant difference in decodability 
+  ## does one-sided t-tests at all slices for significant difference in decodability 
   ## between true and random label and adjusts p-values for multiple NHT
   #INPUT ---
   #result: df with columns specified by dv, pair and group
@@ -760,7 +768,7 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
     if (paired) { #average for subjects
       slice = aggregate(aggform, data=slice, mean)
     }
-    test = t.test(form, data=slice, paired=paired)
+    test = t.test(form, data=slice, paired=paired, alternative="greater")
     diff = ifelse(paired, unname( test$estimate[1] ), 
                   unname( test$estimate[1]-test$estimate[2] ))
     c(diff=diff, pval=test$p.value)

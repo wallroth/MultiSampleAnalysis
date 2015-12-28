@@ -357,7 +357,7 @@ data.reduce_levels <- function(data, labels, col=2) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }
 
-data.collapse_levels <- function(data, labels, col=2) {
+data.collapse_levels <- function(data, labels, col=2, verbose=T) {
   ## function to collapse specified factor labels
   ## preferable choice over data.reduce_levels if you want to keep all samples 
   ## and some factor levels are more similar than others
@@ -368,6 +368,7 @@ data.collapse_levels <- function(data, labels, col=2) {
   #        e.g. c(1,2) changes the labels to 1
   #        e.g. list( c(1,2), c(3,4) ) changes labels to 1 and 3 (4 labels->2 labels)
   #col: column with the outcome (class labels), defaults to 2nd column
+  #verbose: print information about collapsed levels and new names
   #RETURNS ---
   #data of the same size with reduced number of class labels
   #note: label 0 will be avoided as a label for the merged classes
@@ -388,8 +389,10 @@ data.collapse_levels <- function(data, labels, col=2) {
     collapsed = as.numeric( outcome %in% lab ) #merge labels
     newlab = ifelse(lab[1] > 0, lab[1], lab[2]) #new label for the combination (not 0)
     collapsed[collapsed>0] = newlab
-    print( paste("Collapsed factor levels", 
-                 paste(as.character(lab),collapse=" & "), "to", newlab) )
+    if (verbose) {
+      print( paste("Collapsed factor levels", 
+                   paste(as.character(lab),collapse=" & "), "to", newlab) )
+    }
     temp = temp + collapsed #save position and label in temp
   }
   #change labels in data
@@ -443,7 +446,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   require(utils, quietly=T)
   args.in = list(...)
   fun.args = formals( funStr ) #function arguments
-  use.args = modifyList(fun.args, args.in) #overwrite matching arguments 
+  use.args = modifyList(fun.args, args.in, keep.null=T) #overwrite matching arguments 
   use.args = use.args[ names(use.args) %in% names(fun.args) ] #use only legal arguments
   return( use.args )
 }
