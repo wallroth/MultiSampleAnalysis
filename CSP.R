@@ -237,6 +237,38 @@ CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
   return(features)
 }
 
+CSP.Multiclass.apply <- function(data, ...) {
+  ## Multiclass extension to CSP using OVR (one vs. rest) approach, cf. Dornhege et al. 2004
+  ## input is the same as for CSP but data contains more than 2 unique classes
+  ## the resulting filters/patterns are the result of a per-class comparison against the others
+  ## whose filters/patterns (each 2*npattern) were column-bound and ordered for the classes
+  args.csp = .eval_ellipsis("CSP.apply", ...)
+  args.feat = .eval_ellipsis("CSP.get_features", ...)
+  args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.feat[3:4])
+  data = data.check(data, aslist=F)
+  k = unique(data[,2]) #multiclass outcome expected in 2nd column
+  if (length(k) <= 2) { stop( "No multi-class outcome found in the 2nd column." ) }
+  #iterate over the classes to obtain OVR filters
+  OVR = lapply(k, function(class) {
+    #collapse all other classes to one level ("rest")
+    d = data.collapse_levels(data, labels = k[!k %in% class])
+    csp = do.call(CSP.apply, modifyList( args.csp, list(data=d) ))
+    list(filters = csp$filters, patterns = csp$patterns )
+  })
+  #column bind the per class OVR filters and patterns 
+  #order k because otherwise its order will conform to the first appearance in data
+  filters = do.call(cbind, lapply(OVR[ order(k) ], "[[", "filters"))
+  patterns = do.call(cbind, lapply(OVR[ order(k) ], "[[", "patterns"))
+  #get features and outcome
+  features = do.call(CSP.get_features, modifyList( args.feat, list(data=data, filters=filters) ))
+  nsamples = data.get_samplenum(data)
+  target = data[seq(1, nrow(data), nsamples), 2]
+  return(list(outcome=target,
+              features=features, 
+              filters=filters, 
+              patterns=patterns))
+}
+
 # CSP.get_sliced_features <- function(data) {
 #   ## gets the log variance of sliced CSP components
 #   #INPUT ---
