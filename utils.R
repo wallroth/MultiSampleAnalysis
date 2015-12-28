@@ -357,7 +357,7 @@ data.reduce_levels <- function(data, labels, col=2) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }
 
-data.collapse_levels <- function(data, labels, col=2) {
+data.collapse_levels <- function(data, labels, new_labels=NULL, col=2, verbose=T) {
   ## function to collapse specified factor labels
   ## preferable choice over data.reduce_levels if you want to keep all samples 
   ## and some factor levels are more similar than others
@@ -368,6 +368,7 @@ data.collapse_levels <- function(data, labels, col=2) {
   #        e.g. c(1,2) changes the labels to 1
   #        e.g. list( c(1,2), c(3,4) ) changes labels to 1 and 3 (4 labels->2 labels)
   #col: column with the outcome (class labels), defaults to 2nd column
+  #verbose: print information about collapsed levels and new names
   #RETURNS ---
   #data of the same size with reduced number of class labels
   #note: label 0 will be avoided as a label for the merged classes
@@ -379,22 +380,27 @@ data.collapse_levels <- function(data, labels, col=2) {
   if ( length( unique(allLabs) ) < length(allLabs) ) {
     stop( "Don't specify labels multiple times. This will likely lead to unintended results." )
   }  
-  temp = rep(0, length(outcome)) #vector to save positions and labels
-  for (lab in labels) {
+  temp = as.character(outcome)
+  for ( i in seq_along(labels) ) {
+    lab = labels[[i]]
+    if ( !is.null(new_labels) && i <= length(labels) ) {
+      newlab = new_labels[i]
+    } else {
+      newlab = lab[1]
+    }
     if (length(lab) < 2) {
       stop( paste0("Problem with label ", as.character(lab), 
                    ". Specify at least 2 labels to collapse.") )
     }
-    collapsed = as.numeric( outcome %in% lab ) #merge labels
-    newlab = ifelse(lab[1] > 0, lab[1], lab[2]) #new label for the combination (not 0)
-    collapsed[collapsed>0] = newlab
-    print( paste("Collapsed factor levels", 
-                 paste(as.character(lab),collapse=" & "), "to", newlab) )
-    temp = temp + collapsed #save position and label in temp
+    temp[ outcome %in% lab ] = newlab
+    if (verbose) {
+      print( paste("Collapsed factor levels", 
+                   paste(as.character(lab),collapse=" & "), "to", newlab) )
+    }
   }
   #change labels in data
-  data[ outcome %in% allLabs, col] = temp[ outcome %in% allLabs ]
-  try( data[,col] <- droplevels(data[,col]), silent=T ) #in case of factor
+  data[, col] = as.factor(temp)
+  try( data[,col] <- droplevels(data[,col]), silent=T )
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }  
 
@@ -443,7 +449,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   require(utils, quietly=T)
   args.in = list(...)
   fun.args = formals( funStr ) #function arguments
-  use.args = modifyList(fun.args, args.in) #overwrite matching arguments 
+  use.args = modifyList(fun.args, args.in, keep.null=T) #overwrite matching arguments 
   use.args = use.args[ names(use.args) %in% names(fun.args) ] #use only legal arguments
   return( use.args )
 }
