@@ -220,18 +220,37 @@ data.trials.remove_samples <- function(data, end, start=1, relabel=T) {
 
 data.resample <- function(data, old.srate, new.srate) {
   ## resample data by trial-wise linear interpolation
+  ## uses zero padding so that artifacts won't be carried into the data
   #INPUT ---
   #data: continuous df or trial list
   #old.srate: current sampling rate
   #new.srate: desired sampling rate
-  
+  .eval_package("MASS")
   data = data.check(data, aslist=T, strip=F) #transform to list
+  nsamples = data.get_samplenum(data[[1]])
+  frac = MASS::fractions(new.srate/old.srate)
+  #calculate zero pad length:
+  #note: by using fraction, rounding error accumulation is minimized
+  if ( old.srate %% new.srate != 0 ) { 
+    temp = strsplit( attr(frac, "fracs"), "/" )
+    p = as.numeric( temp[[1]][1] )
+    q = as.numeric( temp[[1]][2] )
+  } else { #not a fraction
+    p = new.srate/old.srate 
+    q = 1
+  }
+  nPad = ceiling( (max(p,q) * 10)/q ) * q
+  n = ceiling( (2*nPad + nsamples)*frac ) #new number of samples
+  unPad = nPad * frac
   #don't interpolate across boundaries:
   resampled = lapply(data, function(trial) {
-    nsamples = data.get_samplenum(trial)
-    n = ceiling( nsamples / (old.srate/new.srate) ) #new number of samples
-    data.frame(samples=1:n, outcome=trial[1:n,2], 
-               sapply( apply(trial[,is.datacol(trial)], 2, approx, n=n), "[[", 2) )
+    temp = trial[, is.datacol(trial) ]
+    padstart = temp[rep(1, nPad), ] #repeat first row n times
+    padend = temp[rep(nrow(temp), nPad), ] #repeat last row n times
+    temp = rbind(padstart, temp, padend) #zero padded trial data
+    #resample
+    temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
+    data.frame(samples=1:(n-2*unPad), outcome=trial[1,2], temp[(unPad+1):(nrow(temp)-unPad),])
     })
   return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
 }
@@ -367,6 +386,7 @@ data.collapse_levels <- function(data, labels, new_labels=NULL, col=2, verbose=T
   #        corresponding to the class labels you wish to merge,
   #        e.g. c(1,2) changes the labels to 1
   #        e.g. list( c(1,2), c(3,4) ) changes labels to 1 and 3 (4 labels->2 labels)
+  #new_labels: a vector defining new labels 
   #col: column with the outcome (class labels), defaults to 2nd column
   #verbose: print information about collapsed levels and new names
   #RETURNS ---
@@ -387,10 +407,6 @@ data.collapse_levels <- function(data, labels, new_labels=NULL, col=2, verbose=T
       newlab = new_labels[i]
     } else {
       newlab = lab[1]
-    }
-    if (length(lab) < 2) {
-      stop( paste0("Problem with label ", as.character(lab), 
-                   ". Specify at least 2 labels to collapse.") )
     }
     temp[ outcome %in% lab ] = newlab
     if (verbose) {

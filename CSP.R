@@ -248,7 +248,6 @@ CSP.Multiclass.apply <- function(data, ...) {
   ## the resulting filters/patterns are the result of a per-class comparison against the others
   ## whose filters/patterns (each 2*npattern) were column-bound and ordered for the classes
   args.csp = .eval_ellipsis("CSP.apply", ...)
-  args.feat = .eval_ellipsis("CSP.get_features", ...)
   args.csp[["..."]] = NULL
   data = data.check(data, aslist=F)
   k = unique(data[,2]) #multiclass outcome expected in 2nd column
@@ -264,6 +263,11 @@ CSP.Multiclass.apply <- function(data, ...) {
   filters = do.call(cbind, lapply(OVR[ order(k) ], "[[", "filters"))
   patterns = do.call(cbind, lapply(OVR[ order(k) ], "[[", "patterns"))
   #get features and outcome
+  if ( !eval(args.csp$features) ) {
+    return(list(filters=filters, 
+                patterns=patterns))
+  }
+  args.feat = .eval_ellipsis("CSP.get_features", ...)
   features = do.call(CSP.get_features, modifyList( args.feat, list(data=data, filters=filters) ))
   nsamples = data.get_samplenum(data)
   target = data[seq(1, nrow(data), nsamples), 2]
