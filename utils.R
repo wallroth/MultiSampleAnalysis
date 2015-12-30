@@ -126,7 +126,7 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
   #INPUT ---
   #data: df, matrix or list
   #aslist: True = return as list, False = df
-  #strip: in case of aslist=T - see data.trials.split
+  #strip: remove non-data (measurement) columns, see is.datacol
   #transform: used to return to original data format using .transformed
   #RETURNS ---
   #data 
@@ -148,17 +148,21 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
       return( lapply( data, function(d) d[, datacols] ) )
     }
     return(data) #already a list
-  } 
-  if ( !is.data.frame(data) ) { #if not a df
-    if ( class(data) == "list" ) { #if a list...
-      #find out if trial list or slice list:
-      if ( .is.sliced(data) ) return( .data.unslice(data) )
+  } #else... 
+  if ( class(data) == "list" ) { #if a list...
+    #find out if trial list or slice list:
+    if ( .is.sliced(data) ) {
+      data = .data.unslice(data)
+    } else {
       #retransform notice only if it was a trial list:
       .transformed <<- TRUE
-      return( as.data.frame( data.table::rbindlist(data) ) ) #transform list to df
+      data = data.table::rbindlist(data) #transform list to df
     }
   }
-  return( as.data.frame(data) ) #df or matrix/vector to df
+  #df, dt or matrix/vector to df
+  data = as.data.frame(data)
+  if (strip) return( data[, is.datacol(data)] )
+  return(data)  
 }
 
 data.trials.normalize <- function(data, start=NULL, end=NULL, scale=F) {

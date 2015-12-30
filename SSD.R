@@ -163,8 +163,8 @@ SSD.apply <- function(SSDdata) {
   #       to the components (ordered like the components)
   source("myFuncs.R")
   .eval_package("geigen")
-  Xs = SSDdata[[1]][, is.datacol(SSDdata[[1]])]
-  Xn = SSDdata[[2]][, is.datacol(SSDdata[[2]])]
+  Xs = data.check(SSDdata[[1]], aslist=F, strip=T)
+  Xn = data.check(SSDdata[[2]], aslist=F, strip=T)
   #compute covariance matrices
   norm.cov <- function(X) {
     #population covariance (N) on centered data
