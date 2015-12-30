@@ -216,7 +216,7 @@ SSD.apply <- function(SSDdata) {
   #note: X is now in component space (weights were applied to it) 
 
   #patterns = Covariance of data * weights * inverse of covariance matrix of extracted sources
-  A = C %*% W  %*% solve((t(W) %*% C %*% W)) #pattern matrix
+  A = C %*% W  %*% solve((t(W) %*% C %*% W), tol=10^-30) #pattern matrix
   return( list(W_SSD=W, A_SSD=A, X_SSD=as.data.frame(X_SSD), D_SSD=D) )
 }
 
@@ -315,7 +315,7 @@ SPoC.apply <- function(data, outcome, npattern=NULL, k=NULL, baseline=NULL, ...)
   
   #scale eigenvectors to unit variance since eigenvector scaling is arbitrary and not unique:
   W = apply(W, 2, function(w) { w/sqrt(t(w) %*% C %*% w) }) #does nothing if already unit variance
-  A = C %*% W  %*% solve((t(W) %*% C %*% W)) #pattern matrix
+  A = C %*% W  %*% solve((t(W) %*% C %*% W), tol=10^-30) #pattern matrix
   
 #   #if data were SSD components, change W and A to be applicable to original measurements:
 #   if ( !is.null(W_SSD) ) {

@@ -183,7 +183,7 @@ CSP.apply <- function(data, npattern=3, baseline=NULL, features=T, ...) {
   R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
   #spatial filters:
   W = t(P) %*% R #W' = R' * P
-  A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W)) #pattern matrix
+  A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
   
   #this should be equivalent (does not check for rank)
   #careful with ordering (descending vs. ascending values)
@@ -428,7 +428,7 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=NULL,
       lambda = sort(eig$values, decreasing=F, index.return=T)
       R = eig$vectors[,lambda$ix] #ascending order
       W = t(P) %*% R
-      A = Sigma[[1]] %*% W  %*% solve((t(W) %*% Sigma[[1]] %*% W)) #patterns
+      A = Sigma[[1]] %*% W  %*% solve((t(W) %*% Sigma[[1]] %*% W), tol=10^-30) #patterns
       
       #top eigenvalue per class:
       lambda = data.frame(min=lambda$x[1], max=lambda$x[r]) #min, max
