@@ -7,7 +7,7 @@ is.datacol <- function(data, tol = .Machine$double.eps^0.5) {
   sapply( 1:ncol(data), function(i) {
     if ( is.numeric( data[,i] ) ) {
       #are there non-integer values in the column?
-      return( sum( abs( data[,i] - round(data[,i]) ) < tol ) < nrow(data) ) 
+      return( sum( abs( data[,i] - round(data[,i]) ) < tol, na.rm=T ) < nrow(data)) 
     }
     return( FALSE ) #non-numeric
   })

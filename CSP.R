@@ -234,6 +234,13 @@ CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
     features = t(sapply(trialdata, function(td) apply(as.matrix(td) %*% filters, 2, var)))
     if (logtransform) { 
       features = log(features)
+      if ( any(features == -Inf) ) { #FIX: control for -Inf if var was 0
+        #get columns with -Inf values
+        cols = which( apply(features, 2, function(x) any(x == -Inf)) )
+        for (col in cols) { #replace -Inf values with log of 10^-30
+          features[ which(features[,col] == -Inf), col ] = log(10^-30)
+        }
+      }
     }
     return(features)
   }
