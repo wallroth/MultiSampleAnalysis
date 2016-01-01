@@ -863,6 +863,41 @@ data.permute_labels <- function(data, shuffle=T) {
   return( list(data = data, outcome = as.factor(outcome)) )
 }
 
+data.train_test.split <- function(data, ratio=0.7, split=T) {
+  ## splits data into training and test data set according to the ratio
+  ## the split is balanced for outcome and stratified for trials
+  #INPUT ---
+  #data: df, list of trials/slices
+  #ratio: percentage of data that goes into training
+  #split: if True, data is returned as train and test set, 
+  #       otherwise the the trial indices of the training set are returned
+  #RETURNS ---
+  #either a numeric vector with the trial indices (if split=F) or a list
+  #with train/test set. If data was sliced, the output list will be a slice
+  #list with train and test elements on each slice
+  .eval_package("caret")
+  temp = data.permute_labels(data, shuffle=F)
+  trainidx = caret::createDataPartition(y=temp$outcome, p=ratio)[[1]]
+  if (!split) return(trainidx)
+  #split data into train and test set
+  if ( .is.sliced(temp$data) ) { #data is a slice list
+    #iterate the slices and split
+    splitlist = setNames( lapply( seq_along(temp$data), function(slice) {
+      #get slice data into trial format
+      slice.data = data.trials.split( temp$data[[slice]] )
+      list( train = data.check( slice.data[ trainidx ], aslist=F ), 
+            test = data.check( slice.data[ -trainidx ], aslist=F ) )
+    }), paste0("slice", seq_along(temp$data)) )
+  } else if ( class(temp$data) == "data.frame" ) { #data is a df
+    splitlist = list(train = temp$data[ trainidx, ], test = temp$data[ -trainidx, ])
+  } else { #data is a trial list
+    toDF = class(data) == "data.frame" #if input was a df, transform split back to df
+    splitlist = list(train = data.check( temp$data[ trainidx ], aslist=!toDF ),
+                     test = data.check( temp$data[ -trainidx ], aslist=!toDF ))
+  }
+  return( splitlist )
+}
+
 data.folds.split <- function(data, k=5, shuffle=F) {
   ## fold data for k-fold cross validation
   #INPUT ---
