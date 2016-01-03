@@ -3,6 +3,270 @@
 #make helper functions accessible
 source("myFuncs.R")
 
+decoding.SS.evaluate <- function(train, test, params, parallel=F, 
+                                 permutations=10, boot.iterations=10000,
+                                 CI=c(.95, .99), ...) {
+  ## function to evaluate a model fit with certain parameter settings 
+  ## used at the core of a parameter search
+  ## decoding.SS(.parallel) is called with k=1 and evaluated via data.fit_test
+  #INPUT ---
+  #train, test: the training and test sets. Either corresponding to a single subject
+  #             or to a list of subjects (in which case parallel must be TRUE).
+  #params: list of parameters which will be fed to decoding.SS
+  #        the names must correspond to valid inputs of decoding.SS
+  #        corresponds to the parameter combination of a single instance of a parameter search
+  #parallel: if True, data corresponds to multiple subjects and decoding.SS.parallel 
+  #          will be called
+  #permutations: if > 0, permutation tests will be performed
+  #              the labels of the training and test set are shuffled on each permutation,
+  #              i.e. both the fit and the validation are performed on random data
+  #boot.iterations: if not NULL and permutations > 1, the resulting distribution
+  #                 of randomly obtained AUC values will be bootstrapped with the specified
+  #                 number of iterations
+  #CI: the one-sided confidence interval for the non-parametric test.
+  #    only relevant with permutations > 0. These correspond to the bootstrapped values
+  #    or directly to the distribution of permuted AUC values (if boot.iterations = NULL)
+  #    AUC values larger the CI are conisdered significant
+  #...: further arguments corresponding to decoding.SS that are constant across the parameter search
+  #     e.g. slice = TRUE if all instances of the search operate with sliced data
+  #RETURNS ---
+  #a list whose elements depend on the settigns of parallel and permutations.
+  #params: parameter supplied via 'params' expanded to a df
+  #average: if parallel = T (multiple subjects), an average summary is supplied,
+  #         i.e. the mean of the AUC and if permutations > 0, new CI values 
+  #         corresponding to the overall distribution of random AUC values
+  #summary: result df with AUC, CI values and significance test (separated for sujbects
+  #         if parallel is TRUE).
+  #permutation.result: if permutations > 0, the randomly obtained AUC values
+  #boot.result: boostrapped values if boot.iterations > 0
+  #training.fit: the model fits obtained on the training set with true labels
+  
+  .eval_package("foreach", load=T)
+  if (class(params) != "list") stop( "'params' must be a list with elements corresponding ",
+                                     "to valid inputs of decoding.SS.")
+  if ( any(CI > 1) || any(CI < 0) ) stop( "CI must be in the range 0|1 corresponding to 0% to 100%." )
+  
+  decodeFun = ifelse(parallel, "decoding.SS.parallel", "decoding.SS")
+  args.in = list(...)
+  args.in = modifyList( args.in, params )
+  checktime = proc.time()[3]
+  cat("Starting to decode with true labels . . .")
+  decoding.true = do.call( decodeFun, modifyList(args.in, 
+                      list( data = train, verbose = T, permute = F, k = 1) ) )
+  cat(" | total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
+  #save the true model fit for evaluation and output
+  if (!parallel) {
+    training.fit = decoding.true$fits.true$CV1$Fold1
+  } else {
+    training.fit = lapply( decoding.true$fits.true, function(sub) sub$CV1$Fold1 )
+  }
+  fits = list(training.fit)
+  if ( permutations > 0 ) {
+    training.fit.random = list()
+    cat("Starting permutations . . .\n")
+    for ( run in seq_len(permutations) ) {
+      #shuffle labels
+      if (parallel) {
+        train.random = lapply(train, function(d) data.permute_labels(d, shuffle=T)$data)
+      } else {
+        train.random = data.permute_labels(train, shuffle=T)$data
+      }
+      cat("Permutation:", run)
+      #get random model fit
+      decoding.random = do.call( decodeFun, modifyList(args.in, 
+                            list( data = train.random, verbose = T, permute = F, k = 1) ) )
+      cat(" | total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
+      #save the random fit for evaluation
+      if (parallel) {
+        training.fit.random[[run]] = lapply( decoding.random$fits.true, function(sub) sub$CV1$Fold1 )
+      } else {
+        training.fit.random[[run]] = decoding.random$fits.true$CV1$Fold1
+      }
+    }
+    fits = c( fits, training.fit.random )
+  }
+  pExport = ifelse( is.null(args.in$model), "LiblineaR", 
+                    ifelse( toupper(args.in$model) == "L2", "LiblineaR", "MASS" ) )
+  #create evaluation function to run inside foreach
+  evaluate <- function(test, fit, args.in) {
+    source("myFuncs.R")
+    .loadFuncs(util=T, CSP=T, ML=T)
+    validation_performance = do.call(data.fit_test,
+                                     modifyList( args.in, list( data = test, fit = fit ) ))
+    return(validation_performance)
+  }
+  #save slice argument for evaluate
+  args.in$slice = all(grepl( "slice", names(training.fit) ))
+  if ( parallel ) {
+    args.in$slice = all(grepl( "slice", names(training.fit[[1]]) ))
+    subs = seq_along(train)
+    if ( is.null(args.in$nCores) ) {
+      #initialize all available cores but not more than needed
+      args.in$nCores = min( parallel::detectCores(), length(subs) )
+    }
+    CPUcluster = .parallel_backend(on=T, nCores=args.in$nCores)
+  }
+  ## begin model evaluation
+  test.performance = list()
+  test.run = test
+  cat("Starting model evaluation . . .\n")
+  for ( fitnum in seq_along(fits) ) {
+    cat("Evaluation:", fitnum)
+    if ( fitnum > 1 ) { #permutation fit
+      #shuffle labels
+      if (parallel) {
+        test.run = lapply(test, function(d) data.permute_labels(d, shuffle=T)$data)
+      } else {
+        test.run= data.permute_labels(test, shuffle=T)$data
+      }
+    }
+    if (parallel) {
+      test.performance[[fitnum]] =
+        foreach(sub=subs, .combine=list, .multicombine=T, .packages=pExport) %dopar%
+        evaluate( test.run[[sub]], fits[[fitnum]][[sub]], args.in )  
+    } else {
+      test.performance[[fitnum]] = evaluate( test.run, fits[[fitnum]], args.in )
+    }
+    cat(" | total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
+  }
+  ## extract true and random performance
+  if (parallel) {
+    performance.true = setNames( lapply(subs, function(sub) {
+      test.performance[[1]][[sub]][[1]]
+    }), paste0("subject", subs) )
+    if ( permutations > 0 ) {
+      performance.random = setNames( lapply(subs, function(sub) {
+        perf = lapply( test.performance[2:length(fits)], "[[", sub )
+        if ( args.in$slice ) { #slices
+          perf = do.call( rbind, lapply(perf, "[[", "summary") )
+        } else { #no slices
+          perf = data.frame( AUC = do.call( c, lapply(perf, "[[", "AUC") ) )
+        }
+      }), paste0("subject", subs) )
+    }
+  } else {
+    performance.true = test.performance[[1]][[1]]
+    if ( permutations > 0 ) {
+      performance.random = lapply( test.performance[2:length(fits)], "[[", 1 )
+      if ( args.in$slice ) { #slices
+        performance.random = do.call( rbind, performance.random )
+      } else { #no slices
+        performance.random = data.frame( AUC = do.call( c, performance.random ) )
+      }
+    }
+  }
+  ## compare random vs. true performance
+  boot = permutations > 1 && !is.null(boot.iterations) && boot.iterations > 1
+  if (boot) {
+    cat("Bootstrapping . . .")
+    if (parallel) {
+      boot.result = foreach(sub=subs, .combine=list, .multicombine=T) %dopar%
+        .bootstrap( performance.random[[sub]], iterations=boot.iterations )
+      boot.result = setNames( boot.result, paste0("subject", subs) )
+    } else {
+      boot.result = list( .bootstrap( performance.random, iterations=boot.iterations ) )
+    }
+  }
+  if (parallel) .parallel_backend(on=F, CPUcluster) #close the CPU cluster
+  # create summary if permutation tests were done
+  if ( permutations > 0 ) {
+    if ( !parallel ) { #create list of 1 subject
+      performance.random = list(performance.random)
+      performance.true = list(performance.true)
+    }
+    summary = setNames( lapply( seq_along(performance.true), function(sub) {
+      #calculate percentile thresholds
+      if (boot) { #result is a matrix
+        thresholds = t( apply( boot.result[[sub]], 1, quantile, prob=CI ) )
+        if ( length(CI) < 2 ) thresholds = matrix(thresholds)
+      } else { #result is a df
+        if ( args.in$slice ) {
+          thresholds = do.call( rbind, lapply( unique(performance.random[[sub]]$slice), function(slice) {
+            quantile( performance.random[[sub]][ performance.random[[sub]]$slice == slice, "AUC" ], prob=CI )
+          }) )
+        } else {
+          thresholds = t( quantile( performance.random[[sub]][, "AUC" ], prob=CI ) )
+        }
+      }
+      if ( is.null(names( performance.true[[sub]] )) ) names( performance.true[[sub]] ) = "AUC"
+      summary = setNames( data.frame( performance.true[[sub]], data.frame(thresholds), row.names=NULL ), 
+                          c( names( performance.true[[sub]] ), paste0("CI", CI*100) ) )
+    }), paste0("subject", seq_along(performance.true)) )
+    for ( p in CI ) {
+      #add 'significance' info to summary
+      summary = lapply( summary, function(s) {
+        s[[paste0("p",p*100)]] = s$AUC > s[[paste0("CI",p*100)]]
+        s
+      })
+    }
+  }
+  cat(" Done. Total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
+  ## compile output
+  output = list( params = expand.grid(params) )
+  if ( !args.in$slice ) { #add name to AUC value
+    if (parallel) {
+      performance.true = lapply(performance.true, setNames, nm="AUC")
+    } else {
+      performance.true = setNames(performance.true, nm="AUC")
+    }
+  }
+  if (parallel) { #create an average
+    average = Reduce("+", performance.true)/length(performance.true)
+    if ( permutations > 0 ) {
+      avg = do.call(rbind, performance.random)
+      if (boot) { #redo bootstrap for average CI
+        avgboot = .bootstrap( avg, iterations=boot.iterations )
+        thresholds = t( apply( avgboot, 1, quantile, prob=CI ) )
+      } else {
+        if (args.in$slice) {
+          thresholds = do.call( rbind, lapply( unique(avg$slice), function(slice) {
+            quantile( avg[ avg$slice == slice, "AUC" ], prob=CI )
+          }) )
+        } else {
+          thresholds = t( quantile( avg[, "AUC" ], prob=CI ) )
+        }
+      }
+      average = setNames( data.frame( average, data.frame(thresholds), row.names=NULL ), 
+                          c( names( average ), paste0("CI", CI*100) ) )
+      for ( p in CI ) {
+        #add 'significance' info
+        average[[paste0("p",p*100)]] = average$AUC > average[[paste0("CI",p*100)]]
+      }
+    } #permutations end
+    output$average = average
+  }
+  if ( permutations > 0 ) {
+    if (!parallel) { #remove the nesting in case of only 1 subject
+      summary = summary[[1]]
+      performance.random = performance.random[[1]]
+      if (boot) boot.result = boot.result[[1]]
+    }
+    output$summary = summary
+    output$permutation.result = performance.random
+    if (boot) output$boot.result = boot.result
+  } else { #no permutation tests
+    output$summary = performance.true
+  }
+  output$training.fit = training.fit
+  return(output)
+}
+
+.bootstrap <- function(values, iterations=10000) {
+  #internal function to bootstrap permutation results
+  if ( "slice" %in% names(values) ) {
+    boot = replicate(iterations, {
+      setNames( sapply( unique(values$slice), function(slice) { #stratify the slices
+        mean( sample( values[ values$slice == slice, "AUC" ], replace=T) )
+      }), paste0("slice", unique(values$slice)) )
+    }) #rows: slice number; columns: iteration
+  } else {
+    boot = t(as.matrix( replicate(iterations, {
+      mean( sample( values[, "AUC" ], replace=T) )
+    }) )) #convert vector to matrix with 1 row for compatibility
+  }
+  return( boot )
+}
+
 data.fit_test <- function(data, fit, slice=F, ...) {
   ## a function to evaluate a model fit on "new" data, i.e. a validation or test set
   ## fit is the result of a fitting procedure, e.g. decoding.SS or data.fit_model
@@ -255,6 +519,10 @@ decoding.GAT.parallel <- function(data, nCores=NULL, ...) {
   }
   .eval_package("foreach", load=T)
   ## initiate parallel backend
+  if ( is.null(nCores) ) {
+    #initialize all available cores but not more than needed
+    nCores = min( parallel::detectCores(), length(data) )
+  }
   CPUcluster = .parallel_backend(on=T, nCores=nCores)
   subs = seq_along(data)
   
@@ -424,6 +692,10 @@ decoding.SS.parallel <- function(data, nCores=NULL, ...) {
   }
   .eval_package("foreach", load=T)
   ## initiate parallel backend
+  if ( is.null(nCores) ) {
+    #initialize all available cores but not more than needed
+    nCores = min( parallel::detectCores(), length(data) )
+  }
   CPUcluster = .parallel_backend(on=T, nCores=nCores)
   subs = 1:length(data)
   
