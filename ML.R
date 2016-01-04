@@ -994,7 +994,7 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
 }
 
 decoding.signtest <- function(result, dv="AUC", pair="label", group="slice", 
-                          adjust="none", alpha=0.01) {
+                              adjust="none", alpha=0.01, parametric=T) {
   ## does one-sided t-tests at all slices for significant difference in decodability 
   ## between true and random label and adjusts p-values for multiple NHT
   #INPUT ---
@@ -1036,19 +1036,45 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
   #split data
   slices = split(result, result[,group])
   #test every slice
-  tests = sapply(slices, function(slice) {
-    if (paired) { #average for subjects
-      slice = aggregate(aggform, data=slice, mean)
+  if (parametric) { #do t.tests
+    tests = sapply(slices, function(slice) {
+      if (paired) { #average for subjects
+        slice = aggregate(aggform, data=slice, mean)
+      }
+      test = t.test(form, data=slice, paired=paired, alternative="greater")
+      diff = ifelse(paired, unname( test$estimate[1] ), 
+                    unname( test$estimate[1]-test$estimate[2] ))
+      c(diff=diff, pval=test$p.value)
+    })
+    #correct for multiple NHT
+    pvals = p.adjust(tests[2,], method=adjust)
+    resultdf = as.data.frame( cbind( 1:length(pvals), meandiff=tests[1,], 
+                                     pval=pvals, significant.p=(pvals<alpha) ) )
+  } else { #do bootstrap
+    #internal bootstrap function
+    .bootfun <- function(x, iter=10000) { #10000 iterations
+      return( replicate(iter, {
+        mean( sample(x, replace=T) )
+      }) )
     }
-    test = t.test(form, data=slice, paired=paired, alternative="greater")
-    diff = ifelse(paired, unname( test$estimate[1] ), 
-                  unname( test$estimate[1]-test$estimate[2] ))
-    c(diff=diff, pval=test$p.value)
-  })
-  #correct for multiple NHT
-  pvals = p.adjust(tests[2,], method=adjust)
-  resultdf = as.data.frame( cbind( 1:length(pvals), meandiff=tests[1,], 
-                                   pval=pvals, significant=(pvals<alpha) ) )
+    #pair level to bootstrap
+    random = ifelse( "random" %in% unique( result[[pair]] ), "random", 
+                     unique( result[[pair]] )[2] )
+    tests = sapply(slices, function(slice) {
+      boot = .bootfun( slice[[dv]][ slice[[pair]] == random ] )
+      CI = quantile(boot, probs=1-alpha)
+      truemean = mean( slice[[dv]][ slice[[pair]] != random ] )
+      diff = truemean - mean(boot)
+      pval = sum( boot >= truemean ) / length(boot)
+      c(true=truemean, diff=diff, pval=pval, ci=CI)
+    })
+    pvals = p.adjust(tests[3,], method=adjust)
+    resultdf = as.data.frame( cbind( seq_along(slices), AUC=tests[1,],
+                                     meandiff=tests[2,], 
+                                     pval=pvals, ci=tests[4,],
+                                     significant.p=pvals<alpha,
+                                     significant.obs=tests[1,]>tests[4,] ) )
+  }
   names(resultdf)[1] = group
   if (group == ".id") { resultdf = resultdf[,-1] }
   return( resultdf )

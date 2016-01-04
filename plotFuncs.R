@@ -26,10 +26,10 @@
 }
 
 decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), onset=T,
-                                  xticks=NULL, xlabels=NULL, padjust="none", 
-                                  alpha=0.01, sign="*", lwd=1.2, hline=0.5, ylims=NULL,
-                                  xlab="Time (ms)", ylab="Decoding Accuracy (AUC)", 
-                                  ggTheme=.ggTheme(), cols=c("#0072BD", "#D95319") ) {
+                                  xticks=NULL, xlabels=NULL, sign="*", lwd=1.2, 
+                                  hline=0.5, ylims=NULL, xlab="Time (ms)", 
+                                  ylab="Decoding Accuracy (AUC)", ggTheme=.ggTheme(), 
+                                  cols=c("#0072BD", "#D95319"), ...) {
   ## provide visualization of per slice averaged decoding result
   #INPUT ---
   #result: list as output by decoding functions with summary and significance
@@ -41,8 +41,6 @@ decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), ons
   #        if only xlabels are specified, xticks will be set where xlabels are
   #xlabels: time stamps you want displayed, default is the same as xticks if not NULL,
   #         else every slice_num/10th tick is labelled (to make them readable)
-  #padjust: adjustment method for significance test, "none" if already applied
-  #alpha: significance level to test against
   #sign: significance indicator sign, pass "" to avoid
   #lwd: line width of the lines
   #hline: dotted horizontal line to indicate chance level, pass NULL to avoid
@@ -62,9 +60,9 @@ decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), ons
   }
   .eval_package("ggplot2", load=T)
   # check significance
-  sign.avg = decoding.signtest(result) 
-  sign.avg$pval = p.adjust(sign.avg$pval, method = padjust)
-  sign.avg$id = ifelse(sign.avg$pval < alpha, sign, "") #plot marker
+  args.sign = .eval_ellipsis("decoding.signtest", ...)
+  sign.avg = do.call( decoding.signtest, modifyList(args.sign, list(result=result)) ) 
+  sign.avg$id = ifelse(sign.avg$significant.p, sign, "") #plot marker
   # average for all subjects
   subj.avg = aggregate(AUC ~ label + slice, data=result, mean)
   
@@ -78,7 +76,7 @@ decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), ons
       xticks = timepoints
       xstep = max(1, round( xlen/10 )) #stepsize for displayed labels
       xidx <- seq(1, xlen, xstep) #xticks with labels
-      xlabels <- as.character( timepoints )
+      xlabels <- as.character( round(timepoints, 2) )
       xlabels[-xidx] <- ""
     } else {
       xlabels = xticks
@@ -134,11 +132,11 @@ decoding.plot_ACC_AVG <- function(result, ribbons=F, timerange=c(-500,2000), ons
 }
 
 decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timerange=c(-500,2000), 
-                                   onset=T, xticks=NULL, xlabels=NULL, padjust="none", 
-                                   alpha=0.01, sign="*", lwd=1.2, hline=0.5, ylims=NULL,
+                                   onset=T, xticks=NULL, xlabels=NULL, sign="*", 
+                                   lwd=1.2, hline=0.5, ylims=NULL,
                                    xlab="Time (ms)", ylab="Decoding Accuracy (AUC)", 
                                    ggTheme=.ggTheme(), cols=c("#0072BD", "#D95319"),
-                                   subj_infopos = NULL, subj_infotxt = "Subject") { 
+                                   subj_infopos = NULL, subj_infotxt = "Subject", ...) { 
   ## provide visualization of per slice averaged decoding result for every subject
   #INPUT ---
   #result: list as output by decoding functions with summary and significance
@@ -151,8 +149,6 @@ decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timer
   #        if only xlabels are specified, xticks will be set where xlabels are
   #xlabels: time stamps you want displayed, default is the same as xticks if not NULL,
   #         else every slice_num/10th tick is labelled (to make them readable)
-  #padjust: adjustment method for significance test, "none" if already applied
-  #alpha: significance level to test against
   #sign: significance indicator sign, pass "" to avoid
   #lwd: line width of the lines
   #hline: dotted horizontal line to indicate chance level, pass NULL to avoid
@@ -179,6 +175,7 @@ decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timer
     stop( "No multiple subject information found." )
   }
   .eval_package( c("ggplot2","gridExtra"), load=T)
+  args.sign = .eval_ellipsis("decoding.signtest", ...)
   LOSO = any(result$subject < 0) #LOSO Or SS? 
   if (LOSO & ribbons) {
     warning( "For a single instance of LOSO decoding there is no variation, thus no ribbons." )
@@ -202,7 +199,7 @@ decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timer
       xticks = timepoints
       xstep = max(1, round( xlen/10 )) #stepsize for displayed labels
       xidx <- seq(1, xlen, xstep) #xticks with labels
-      xlabels <- as.character( timepoints )
+      xlabels <- as.character( round(timepoints, 2) )
       xlabels[-xidx] <- ""
     } else {
       xlabels = xticks
@@ -246,9 +243,9 @@ decoding.plot_ACC_INDV <- function(result, ribbons=F, multi.layout=c(2,2), timer
       ggTheme
     if (!LOSO) {
       #calculate significance
-      sign.s = decoding.signtest( result[result$subject==i, names(result) != "subject"] ) 
-      sign.s$pval = p.adjust(sign.s$pval, method = padjust)
-      sign.s$id = ifelse(sign.s$pval < alpha, sign, "") #plot marker
+      sign.s = do.call( decoding.signtest, modifyList(args.sign, 
+          list(result = result[result$subject==i, names(result) != "subject"] )) ) 
+      sign.s$id = ifelse(sign.avg$significant.p < alpha, sign, "") #plot marker
       ypos = min(maxlim, max(subj.s$AUC)+ysteps) #significance indicator ypos
       ps = ps + annotate("text", x=timepoints, y=ypos, label=sign.s$id, col="black", size=5)
     }
@@ -328,7 +325,7 @@ decoding.plot_GAT <- function(GATmatrix, timerange=c(-500,2000), onset=T,
       ticks = timepoints
       step = round( len/10 ) #stepsize for displayed labels
       idx <- seq(1, len, step) #ticks with labels
-      labels <- as.character( timepoints )
+      labels <- as.character( round(timepoints, 2) )
       labels[-idx] <- ""
     } else {
       labels = ticks
@@ -377,7 +374,7 @@ data.plot_conditions <- function(data, columns=NULL, cols=NULL, lwd=1) {
   classdata = lapply( classes, function(cl) {
     cdat = trialdata[ target == cl ] #all trials for one outcome
     #compute trial and column average
-    rowMeans( do.call(cbind, lapply(cdat, function(d) rowMeans(d[, columns], na.rm=T))) )
+    rowMeans( do.call(cbind, lapply(cdat, function(d) rowMeans( as.matrix(d[, columns]), na.rm=T ))) )
   })
   #calculate min max for y axis:
   temp = do.call(c, classdata)
