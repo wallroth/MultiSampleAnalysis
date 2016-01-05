@@ -994,7 +994,7 @@ decoding.SS <- function(data, slice=T, permute=T, numcv=1, verbose=F, CSP=F, ...
 }
 
 decoding.signtest <- function(result, dv="AUC", pair="label", group="slice", 
-                              adjust="none", alpha=0.01, parametric=T) {
+                              adjust="none", alpha=0.01, parametric=T, iterations=1000) {
   ## does one-sided t-tests at all slices for significant difference in decodability 
   ## between true and random label and adjusts p-values for multiple NHT
   #INPUT ---
@@ -1013,11 +1013,6 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
   #NOTE ---
   #does paired samples t-tests per slice if subject list is supplied, otherwise
   #tests for independent samples, i.e. true vs random performance at each slice
-  if ( group == "" ) {
-    #placeholder for simple independent t.testing (aggregate will do nothing)
-    result = cbind(.id=1, result)
-    group = ".id"
-  }
   paired = F
   form = as.formula( paste(dv, pair, sep="~") )
   if ( class(result) == "list" | "subject" %in% names(result) ) { #subject list
@@ -1033,6 +1028,14 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
     #formula to aggregate for subjects
     aggform = as.formula( paste(dv, paste(pair, "subject", sep="+"), sep="~") )
   }
+  #check the columns
+  if ( group == "" || !group %in% names(result) ) {
+    #placeholder for simple independent t.testing (aggregate will do nothing)
+    result = cbind(.id=1, result)
+    group = ".id"
+  }
+  if ( !pair %in% names(result) ) stop( "Cannot find a column named '", pair, "'." )
+  if ( !dv %in% names(result) ) stop( "Cannot find a column named '", dv, "'." )
   #split data
   slices = split(result, result[,group])
   #test every slice
@@ -1051,22 +1054,37 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
     resultdf = as.data.frame( cbind( 1:length(pvals), meandiff=tests[1,], 
                                      pval=pvals, significant.p=(pvals<alpha) ) )
   } else { #do bootstrap
-    #internal bootstrap function
-    .bootfun <- function(x, iter=10000) { #10000 iterations
+    #internal bootstrap functions
+    .bootquant <- function(x, alpha=alpha, iter=iterations) {
+      #estimate the quantile via bootstrap
       return( replicate(iter, {
-        mean( sample(x, replace=T) )
+        quantile( sample(x, replace=T), probs=1-alpha )
       }) )
+    }
+    .permutediff <- function(iter=iterations) {
+      #estimate the difference via permutations under the null
+      replicate(iter, {
+        #keep group sizes
+        group = sample( slice[[pair]] , replace=F)
+        x1 = slice[[dv]][ group != random ]
+        x2 = slice[[dv]][ group == random ]
+        mean(x1) - mean(x2) #difference between true and random
+      })
     }
     #pair level to bootstrap
     random = ifelse( "random" %in% unique( result[[pair]] ), "random", 
                      unique( result[[pair]] )[2] )
     tests = sapply(slices, function(slice) {
-      boot = .bootfun( slice[[dv]][ slice[[pair]] == random ] )
-      CI = quantile(boot, probs=1-alpha)
-      truemean = mean( slice[[dv]][ slice[[pair]] != random ] )
-      diff = truemean - mean(boot)
-      pval = sum( boot >= truemean ) / length(boot)
-      c(true=truemean, diff=diff, pval=pval, ci=CI)
+      null = slice[[dv]][ slice[[pair]] == random ]
+      true = slice[[dv]][ slice[[pair]] != random ]
+      boot.ci = .bootquant( null, alpha=alpha, iter=iterations )
+      CI = mean(boot.ci) #mean of the 1000 quantiles
+      diff = mean(true) - mean(null)
+      diff.permute = .permutediff(iter=iterations)
+      #compute pvalues by looking at the number of times the 
+      #randomly permuted differences were larger than the actual diff
+      pval = mean(diff.permute >= diff) #one-sided pval (greater)
+      c(true=mean(true), diff=diff, pval=pval, ci=CI)
     })
     pvals = p.adjust(tests[3,], method=adjust)
     resultdf = as.data.frame( cbind( seq_along(slices), AUC=tests[1,],
