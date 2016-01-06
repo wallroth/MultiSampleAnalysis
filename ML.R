@@ -1061,7 +1061,7 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
         quantile( sample(x, replace=T), probs=1-alpha )
       }) )
     }
-    .permutediff <- function(iter=iterations) {
+    .permutediff <- function(slice, pair, dv, random, iter=iterations) {
       #estimate the difference via permutations under the null
       replicate(iter, {
         #keep group sizes
@@ -1077,10 +1077,18 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
     tests = sapply(slices, function(slice) {
       null = slice[[dv]][ slice[[pair]] == random ]
       true = slice[[dv]][ slice[[pair]] != random ]
-      boot.ci = .bootquant( null, alpha=alpha, iter=iterations )
-      CI = mean(boot.ci) #mean of the 1000 quantiles
       diff = mean(true) - mean(null)
-      diff.permute = .permutediff(iter=iterations)
+      if (paired) { #multiple subjects
+        #per subject bootstrapped CI
+        boot.ci = sapply( unique(slice$subject), function(s) {
+          null = slice[[dv]][ slice$subject == s & slice[[pair]] == random ]
+          mean( .bootquant( null, alpha=alpha, iter=iterations ) )
+        })
+      } else {
+        boot.ci = .bootquant( null, alpha=alpha, iter=iterations )
+      } 
+      CI = mean(boot.ci) #mean of the bootstrapped CIs
+      diff.permute = .permutediff(slice, pair, dv, random, iter=iterations)
       #compute pvalues by looking at the number of times the 
       #randomly permuted differences were larger than the actual diff
       pval = mean(diff.permute >= diff) #one-sided pval (greater)
