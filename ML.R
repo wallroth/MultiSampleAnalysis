@@ -4,7 +4,7 @@
 source("myFuncs.R")
 
 decoding.SS.evaluate <- function(train, test, params, parallel=F, 
-                                 permutations=10, boot.iterations=10000,
+                                 permutations=10, boot.iterations=1000,
                                  CI=c(.95, .99), ...) {
   ## function to evaluate a model fit with certain parameter settings 
   ## used at the core of a parameter search
@@ -157,115 +157,102 @@ decoding.SS.evaluate <- function(train, test, params, parallel=F,
   }
   ## compare random vs. true performance
   boot = permutations > 1 && !is.null(boot.iterations) && boot.iterations > 1
-  if (boot) {
-    cat("Bootstrapping . . .")
-    if (parallel) {
-      boot.result = foreach(sub=subs, .combine=list, .multicombine=T) %dopar%
-        .bootstrap( performance.random[[sub]], iterations=boot.iterations )
-      boot.result = setNames( boot.result, paste0("subject", subs) )
-    } else {
-      boot.result = list( .bootstrap( performance.random, iterations=boot.iterations ) )
-    }
+  if ( !parallel ) { #create list of 1 subject for compatibility
+    if ( permutations > 0 ) performance.random = list(performance.random)
+    performance.true = list(performance.true)
   }
-  if (parallel) .parallel_backend(on=F, CPUcluster) #close the CPU cluster
+  if ( !args.in$slice ) { #turn the numeric value into a df
+    performance.true = lapply(performance.true, function(pt) data.frame(AUC=pt))
+  }
   # create summary if permutation tests were done
   if ( permutations > 0 ) {
-    if ( !parallel ) { #create list of 1 subject
-      performance.random = list(performance.random)
-      performance.true = list(performance.true)
-    }
     summary = setNames( lapply( seq_along(performance.true), function(sub) {
-      #calculate percentile thresholds
-      if (boot) { #result is a matrix
-        thresholds = t( apply( boot.result[[sub]], 1, quantile, prob=CI ) )
-        if ( length(CI) < 2 ) thresholds = matrix(thresholds)
-      } else { #result is a df
+      #concatenate true and random AUC scores with label info
+      df = rbind( data.frame( label="true", performance.true[[sub]] ), 
+                  data.frame( label="random", performance.random[[sub]] ) )
+      res = data.frame() #place holder
+      if (!boot) { #calculate percentile thresholds directly on the permutations
         if ( args.in$slice ) {
           thresholds = do.call( rbind, lapply( unique(performance.random[[sub]]$slice), function(slice) {
             quantile( performance.random[[sub]][ performance.random[[sub]]$slice == slice, "AUC" ], prob=CI )
           }) )
+          res = aggregate(AUC~slice, data=subset(df, label=="true"), mean)
         } else {
           thresholds = t( quantile( performance.random[[sub]][, "AUC" ], prob=CI ) )
+          res = data.frame( AUC = mean( subset(df, label=="true")$AUC ) )
+        }
+        for ( ci in CI ) {
+          res[[ paste0("CI",ci*100) ]] = thresholds[, which(ci == CI) ]
+          res[[ paste0("AUC>CI",ci*100) ]] = res$AUC > thresholds[, which(ci == CI) ]
         }
       }
-      if ( is.null(names( performance.true[[sub]] )) ) names( performance.true[[sub]] ) = "AUC"
-      summary = setNames( data.frame( performance.true[[sub]], data.frame(thresholds), row.names=NULL ), 
-                          c( names( performance.true[[sub]] ), paste0("CI", CI*100) ) )
+      list(summary=df, result=res) #return
     }), paste0("subject", seq_along(performance.true)) )
-    for ( p in CI ) {
-      #add 'significance' info to summary
-      summary = lapply( summary, function(s) {
-        s[[paste0("p",p*100)]] = s$AUC > s[[paste0("CI",p*100)]]
-        s
-      })
+    #bootstrap if requested
+    if (boot) {
+      cat("Bootstrapping . . .")
+      if (parallel) {
+        boot.tests = foreach(sub=subs, .combine=list, .multicombine=T) %dopar%
+          decoding.signtest(summary[[sub]]$summary, alpha=1-CI, parametric=F, iterations=boot.iterations)
+        for (sub in subs) { #add boot result to summary
+          summary[[sub]]$result = boot.tests[[sub]]
+        }
+      } else {
+        summary[[1]]$result = decoding.signtest(summary[[1]], alpha=1-CI, parametric=F, iterations=boot.iterations)
+      }
     }
-  }
-  cat(" Done. Total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
+  } #closing summary
+  if (parallel) .parallel_backend(on=F, CPUcluster) #close the CPU cluster
+  
   ## compile output
   output = list( params = expand.grid(params) )
-  if ( !args.in$slice ) { #add name to AUC value
-    if (parallel) {
-      performance.true = lapply(performance.true, setNames, nm="AUC")
-    } else {
-      performance.true = setNames(performance.true, nm="AUC")
-    }
-  }
   if (parallel) { #create an average
-    average = Reduce("+", performance.true)/length(performance.true)
+    #get values for all subjects
+    df = data.frame(subject=rep( subs, each=nrow(performance.true[[1]]) ),
+                    label="true", do.call(rbind, performance.true), row.names=NULL)
     if ( permutations > 0 ) {
-      avg = do.call(rbind, performance.random)
-      if (boot) { #redo bootstrap for average CI
-        avgboot = .bootstrap( avg, iterations=boot.iterations )
-        thresholds = t( apply( avgboot, 1, quantile, prob=CI ) )
-      } else {
-        if (args.in$slice) {
-          thresholds = do.call( rbind, lapply( unique(avg$slice), function(slice) {
-            quantile( avg[ avg$slice == slice, "AUC" ], prob=CI )
-          }) )
-        } else {
-          thresholds = t( quantile( avg[, "AUC" ], prob=CI ) )
+      df = rbind( df, data.frame(subject=rep( subs, each=permutations*nrow(performance.true[[1]]) ), 
+                                 label="random", do.call(rbind, performance.random), row.names=NULL) )
+      #simply average the AUC and CIs
+      tmp = do.call(rbind, lapply(summary, "[[", "result")) #get the CIs 
+      CIstr = ifelse(boot, "boot.CI", "CI")
+      if (args.in$slice) {
+        avgres = aggregate(AUC~slice, data=subset(df, label=="true"), mean)
+        if (boot) avgres$pval = aggregate(pval~slice, data=tmp, mean)[,2]
+        for ( ci in CI ) { #average the CIs over subjects
+          form = as.formula( paste0(CIstr,ci*100, "~slice") )
+          thresholds = aggregate(form, data=tmp, mean)[,2]
+          avgres[[ paste0(CIstr,ci*100) ]] = thresholds
+          avgres[[ paste0("AUC>CI",ci*100) ]] = avgres$AUC > thresholds
+          if (boot) avgres[[ paste0("p<",sub('0','',1-ci)) ]] = avgres$pval < 1-ci
+        }
+      } else { #no slices
+        avgres = data.frame( AUC = mean( subset(df, label=="true")$AUC ) )
+        if (boot) avgres$pval = mean(tmp$pval)
+        for ( ci in CI ) { #average the CIs over subjects
+          thresholds = mean( tmp[[ paste0(CIstr,ci*100) ]] )
+          avgres[[ paste0(CIstr,ci*100) ]] = thresholds
+          avgres[[ paste0("AUC>CI",ci*100) ]] = avgres$AUC > thresholds
+          if (boot) avgres[[ paste0("p<",sub('0','',1-ci)) ]] = avgres$pval < 1-ci
         }
       }
-      average = setNames( data.frame( average, data.frame(thresholds), row.names=NULL ), 
-                          c( names( average ), paste0("CI", CI*100) ) )
-      for ( p in CI ) {
-        #add 'significance' info
-        average[[paste0("p",p*100)]] = average$AUC > average[[paste0("CI",p*100)]]
-      }
+      output$result.average = avgres
+      output$result.subjects = lapply(summary, "[[", "result")
     } #permutations end
-    output$average = average
-  }
-  if ( permutations > 0 ) {
-    if (!parallel) { #remove the nesting in case of only 1 subject
-      summary = summary[[1]]
-      performance.random = performance.random[[1]]
-      if (boot) boot.result = boot.result[[1]]
+    output$summary = df
+  } else { #single subject
+    if ( permutations > 0 ) {
+      output$result = summary[[1]]$result
+      output$summary = summary[[1]]$summary
+    } else {
+      output$summary = performance.true[[1]]
     }
-    output$summary = summary
-    output$permutation.result = performance.random
-    if (boot) output$boot.result = boot.result
-  } else { #no permutation tests
-    output$summary = performance.true
   }
   output$training.fit = training.fit
+  cat(" Done. Total time elapsed (mins):", (proc.time()[3]-checktime)/60, "\n")
   return(output)
 }
 
-.bootstrap <- function(values, iterations=10000) {
-  #internal function to bootstrap permutation results
-  if ( "slice" %in% names(values) ) {
-    boot = replicate(iterations, {
-      setNames( sapply( unique(values$slice), function(slice) { #stratify the slices
-        mean( sample( values[ values$slice == slice, "AUC" ], replace=T) )
-      }), paste0("slice", unique(values$slice)) )
-    }) #rows: slice number; columns: iteration
-  } else {
-    boot = t(as.matrix( replicate(iterations, {
-      mean( sample( values[, "AUC" ], replace=T) )
-    }) )) #convert vector to matrix with 1 row for compatibility
-  }
-  return( boot )
-}
 
 data.fit_test <- function(data, fit, slice=F, ...) {
   ## a function to evaluate a model fit on "new" data, i.e. a validation or test set
@@ -1013,6 +1000,7 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
   #NOTE ---
   #does paired samples t-tests per slice if subject list is supplied, otherwise
   #tests for independent samples, i.e. true vs random performance at each slice
+  if ( any(alpha > 1) || any(alpha < 0) ) stop( "alpha must be in the range 0|1." )
   paired = F
   form = as.formula( paste(dv, pair, sep="~") )
   if ( class(result) == "list" | "subject" %in% names(result) ) { #subject list
@@ -1038,6 +1026,7 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
   if ( !dv %in% names(result) ) stop( "Cannot find a column named '", dv, "'." )
   #split data
   slices = split(result, result[,group])
+  alpha = sort(alpha, decreasing=T)
   #test every slice
   if (parametric) { #do t.tests
     tests = sapply(slices, function(slice) {
@@ -1052,14 +1041,18 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
     #correct for multiple NHT
     pvals = p.adjust(tests[2,], method=adjust)
     resultdf = as.data.frame( cbind( 1:length(pvals), meandiff=tests[1,], 
-                                     pval=pvals, significant.p=(pvals<alpha) ) )
+                                     pval=pvals ) )
+    for ( a in alpha ) {
+      resultdf[[ paste0("p<",sub('0','',a)) ]] = resultdf$pval < a
+    }
   } else { #do bootstrap
     #internal bootstrap functions
     .bootquant <- function(x, alpha=alpha, iter=iterations) {
       #estimate the quantile via bootstrap
-      return( replicate(iter, {
+      out = replicate(iter, {
         quantile( sample(x, replace=T), probs=1-alpha )
-      }) )
+      })
+      return( matrix(out, nrow=length(alpha)) ) #unify output for different alpha lengths
     }
     .permutediff <- function(slice, pair, dv, random, iter=iterations) {
       #estimate the difference via permutations under the null
@@ -1072,34 +1065,41 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
       })
     }
     #pair level to bootstrap
-    random = ifelse( "random" %in% unique( result[[pair]] ), "random", 
-                     unique( result[[pair]] )[2] )
-    tests = sapply(slices, function(slice) {
+    if ( !is.factor(result[[pair]]) ) result[[pair]] = as.factor(result[[pair]])
+    random = ifelse( any( grepl("rand", levels( result[[pair]] )) ), #if rand/random is a label
+                     levels( result[[pair]] )[ grep("rand", levels( result[[pair]] )) ], #choose that one
+                     levels( result[[pair]] )[2] ) #otherwise the 2nd label
+    tests = lapply(slices, function(slice) {
       null = slice[[dv]][ slice[[pair]] == random ]
       true = slice[[dv]][ slice[[pair]] != random ]
       diff = mean(true) - mean(null)
       if (paired) { #multiple subjects
         #per subject bootstrapped CI
-        boot.ci = sapply( unique(slice$subject), function(s) {
+        boot.ci = matrix( sapply( unique(slice$subject), function(s) {
           null = slice[[dv]][ slice$subject == s & slice[[pair]] == random ]
-          mean( .bootquant( null, alpha=alpha, iter=iterations ) )
-        })
+          bootout = .bootquant( null, alpha=alpha, iter=iterations )
+          apply(bootout, 1, mean)
+        }), nrow=length(alpha) )
       } else {
         boot.ci = .bootquant( null, alpha=alpha, iter=iterations )
       } 
-      CI = mean(boot.ci) #mean of the bootstrapped CIs
+      CI = apply(boot.ci, 1, mean) #mean of the bootstrapped CIs
       diff.permute = .permutediff(slice, pair, dv, random, iter=iterations)
       #compute pvalues by looking at the number of times the 
       #randomly permuted differences were larger than the actual diff
       pval = mean(diff.permute >= diff) #one-sided pval (greater)
-      c(true=mean(true), diff=diff, pval=pval, ci=CI)
+      resultdf = data.frame(AUC=mean(true), meandiff=diff, pval=pval)
+      for ( a in alpha ) {
+        resultdf[[ paste0("boot.CI",100-a*100) ]] = CI[ which(alpha == a) ]
+        resultdf[[ paste0("p<",sub('0','',a)) ]] = resultdf$pval < a
+        resultdf[[ paste0("AUC>CI",100-a*100) ]] = resultdf$AUC > CI[ which(alpha == a) ]
+      }
+      resultdf #return
     })
-    pvals = p.adjust(tests[3,], method=adjust)
-    resultdf = as.data.frame( cbind( seq_along(slices), AUC=tests[1,],
-                                     meandiff=tests[2,], 
-                                     pval=pvals, ci=tests[4,],
-                                     significant.p=pvals<alpha,
-                                     significant.obs=tests[1,]>tests[4,] ) )
+    resultdf = data.frame( slice = seq_along(slices), do.call(rbind, tests), check.names=F )
+    if ( adjust != "none" ) {
+      resultdf[["p.adjusted"]] = p.adjust( resultdf$pval, method=adjust )
+    }
   }
   names(resultdf)[1] = group
   if (group == ".id") { resultdf = resultdf[,-1] }
