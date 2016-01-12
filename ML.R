@@ -1039,9 +1039,8 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
       c(diff=diff, pval=test$p.value)
     })
     #correct for multiple NHT
-    pvals = p.adjust(tests[2,], method=adjust)
-    resultdf = as.data.frame( cbind( 1:length(pvals), meandiff=tests[1,], 
-                                     pval=pvals ) )
+    resultdf = as.data.frame( cbind( 1:ncol(tests), meandiff=tests[1,], 
+                                     pval=tests[2,] ) )
     for ( a in alpha ) {
       resultdf[[ paste0("p<",sub('0','',a)) ]] = resultdf$pval < a
     }
@@ -1097,8 +1096,11 @@ decoding.signtest <- function(result, dv="AUC", pair="label", group="slice",
       resultdf #return
     })
     resultdf = data.frame( slice = seq_along(slices), do.call(rbind, tests), check.names=F )
-    if ( adjust != "none" ) {
-      resultdf[["p.adjusted"]] = p.adjust( resultdf$pval, method=adjust )
+  }
+  if ( adjust != "none" ) {
+    resultdf[["p.adjusted"]] = p.adjust( resultdf$pval, method=adjust )
+    for ( a in alpha ) {
+      resultdf[[ paste0("p.adj<",sub('0','',a)) ]] = resultdf$p.adjusted < a
     }
   }
   names(resultdf)[1] = group
