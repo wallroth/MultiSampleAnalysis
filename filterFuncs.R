@@ -1,12 +1,71 @@
-#make helper functions accessible
-source("myFuncs.R")
+## FILTER functions
 
-filter.get_coeffs <- function(frequencies, transwidth, ftype, srate=500, wtype="hamming") {
-  ## creates Hamming window sinc FIR filter coefficients for the given frequency
+data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
+  ## resample data by trial-wise linear interpolation
+  ## uses zero padding so that artifacts won't be carried into the data
   #INPUT ---
-  #frequencies: scalar (high/lowpass) or tuple (bandpass/stop) to specifiy freq (range)
+  #data: continuous df or list of trials, slices, subjects
+  #old.srate: current sampling rate
+  #new.srate: desired sampling rate
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
+  #RETURNS:
+  #data with new sampling rate
+  require(utils, quietly=T); .eval_package("MASS")
+  data = data.check(data, aslist=T, strip=F) #transform to list
+  if ( "slices" %in% attr(data, "type") ) {
+    data = data.trials.split( data, strip=F )
+    .transformed = T #convert to df at the end
+  } else if ( "subjects" %in% attr(data, "type") ) {
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    data = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      data.resample(d, old.srate=old.srate, new.srate=new.srate)
+    .parallel_check(output=pcheck)
+    attr(data, "type") = "subjects"
+    return(data)
+  }
+  nsamples = data.get_samplenum(data[[1]])
+  frac = MASS::fractions(new.srate/old.srate)
+  #calculate zero pad length:
+  #note: by using fraction, rounding error accumulation is minimized
+  if ( old.srate %% new.srate != 0 ) { 
+    temp = strsplit( attr(frac, "fracs"), "/" )
+    p = as.numeric( temp[[1]][1] )
+    q = as.numeric( temp[[1]][2] )
+  } else { #not a fraction
+    p = new.srate/old.srate 
+    q = 1
+  }
+  nPad = ceiling( (max(p,q) * 10)/q ) * q
+  n = ceiling( (2*nPad + nsamples)*frac ) #new number of samples
+  unPad = nPad * frac
+  #obtain datacol info with higher sample number by rebinding temporarily
+  datacols = is.datacol( as.data.frame( data.table::rbindlist(data) ) )
+  cat("Resampling:\n")
+  progBar = txtProgressBar(style=3) #progress bar shown during resampling
+  progBarsteps = seq( 1/length(data), 1, length.out=length(data) )
+  #don't interpolate across boundaries:
+  resampled = lapply( seq_along(data), function(i) {
+    temp = data[[i]][, datacols ]
+    padstart = temp[rep(1, nPad), ] #repeat first row n times
+    padend = temp[rep(nrow(temp), nPad), ] #repeat last row n times
+    temp = rbind(padstart, temp, padend) #zero padded trial data
+    #resample
+    temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
+    setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
+    data.frame(samples=1:(n-2*unPad), outcome=data[[i]][1,2], temp[(unPad+1):(nrow(temp)-unPad),])
+  })
+  close(progBar)
+  return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
+}
+
+filter.coefficients <- function(frequencies, transwidth, ftype, srate=500, wtype="hamming") {
+  ## creates windowed sinc FIR filter coefficients for the given frequency
+  #INPUT ---
+  #frequencies: scalar (high/lowpass) or tuple (bandpass/stop) to specify freq (range)
   #transwidth: scalar, specifies size of roll-off, freq is at the center of this value
-  #         - e.g. 40Hz low-pass: freq 44, transwidth 8, roll-off between 40 and 48
+  #            - e.g. 40Hz low-pass: freq 44, transwidth 8, roll-off between 40 and 48
   #ftype: "low", "high", "pass", "stop" filter type
   #wtype: hamming or blackman window function
   #RETURNS ---
@@ -16,64 +75,75 @@ filter.get_coeffs <- function(frequencies, transwidth, ftype, srate=500, wtype="
   #-> high-pass filtering requires steep transition width whereas low-pass can be shallower
   #transition width: narrower = stricter (more precise but danger of ringing artifacts)
   #generally between 10%-25% of frequency bounds (but larger for very small frequencies)
-  #cutoff frequencies are the center of the transition band
   #ripples in the respective band are the allowed deviation from 0 (stop) / 1 (pass)
-  
   #windowing smoothes filter kernel to minimize edge artifacts
   #zero-padding replaces necessity of two-pass filtering (filtfilt)
-  #upper frequency edge cannot be higher than srate/2 (nyquist frequency)
-
+  if ( max(frequencies) > srate/2 ) stop( "Upper frequency limit is the Nyquist frequency corresponding to srate/2." )
+  .eval_package("signal")
   #normalized transition widths from Widmann (2015) table p.8
   deltaF = ifelse( tolower(wtype) == "blackman", 5.5, 3.3 ) #blackman: 5.5, hamming: 3.3
   m = ceiling(deltaF/(transwidth/srate)/2)*2 #filter order
   #transform frequencies to range [0,1] where 1 corresponds to nyquist freq (srate/2):
   f = frequencies/(srate/2) 
-  
-  #fir1 sets transition zones to 0 and smoothes afterwards with windowing
-  # b = fir1(m, f, type=ftype, window=hamming(m+1), scale=T)
   #using firws import (Widman) instead of fir1
   b = .firfilt.firws(m, f, type=ftype, window=wtype)
-  return(b)
+  return( signal::Ma(b) )
 }
 
-filter.apply <- function(data, b) {
-  ## function to apply the filter coefficients b from filter.get_coeffs to the data
+filter.apply <- function(data, coefficients, nCores=NULL) {
+  ## function to apply the filter coefficients b from filter.coefficients to the data
   ## uses zero-phase one-pass filtering approach within trials 
   #INPUT ---
-  #data: df, matrix or list
-  #b: filter coefficients, e.g. from filter.get_coeffs
+  #data: df, matrix, vector or list of trials, slices, subjects
+  #b: filter coefficients, e.g. from filter.coefficients
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
   #Notes ---
   #tries to not filter across boundaries (trials)
   #only filters numeric non-integer data
-  require(utils, quietly=T)
-  .eval_package("signal")
-  if ( class(data) == "numeric" ) {
-    data = list( as.data.frame(data) ) #vector to df
+  #RETURNS ---
+  #filtered data
+  require(utils, quietly=T);  .eval_package("signal")
+  if ( class(data) == "numeric" ) { #vector to df in a list
+    data = list( as.data.frame(data) ) #camouflaged as trial list
     .transformed = TRUE
   }
-  trialdata = data.check(data, aslist=T, strip=F) #transform to list
-  infoidx = !is.datacol(trialdata[[1]]) #non-measurement data
-  colnames = names(trialdata[[1]]) #save variable names
-  print("Filtering:")
+  data = data.check(data, aslist=T, strip=F) #transform to list
+  if ( "slices" %in% attr(data, "type") ) {
+    data = data.trials.split( data, strip=F )
+    .transformed = T #convert to df at the end
+  } else if ( "subjects" %in% attr(data, "type") ) {
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    data = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      filter.apply(d, coefficients)
+    .parallel_check(output=pcheck)
+    attr(data, "type") = "subjects"
+    return(data)
+  }
+  #obtain infocols with higher sample number by rebinding temporarily
+  infoidx = !is.datacol( as.data.frame( data.table::rbindlist(data) ) )
+  colnames = names(data[[1]]) #save variable names
+  cat("Filtering:\n")
   progBar = txtProgressBar(style=3) #progress bar shown during filtering
-  progBarsteps = seq( 1/length(trialdata), 1, length.out=length(trialdata) )
+  progBarsteps = seq( 1/length(data), 1, length.out=length(data) )
   #iterate over trials:
-  filtdata = lapply(1:length(trialdata), function(i) {
-    data = trialdata[[i]]
-    infocols = data[,infoidx] #info
-    data = as.matrix(data[,!infoidx]) #measurements
+  filtdata = lapply( seq_along(data), function(i) {
+    trial = data[[i]]
+    infocols = trial[, infoidx] #info
+    trial = as.matrix(trial[, !infoidx]) #measurements
     #zero-padding to circumvent delay of filter when one-pass filtering:
-    groupdelay = (length(b)-1)/2
-    padstart = data[rep(1, groupdelay), ] #repeat first row n times
-    padend = data[rep(nrow(data), groupdelay), ] #repeat last row n times
-    if (dim(data)[2] == 1) { #signal is only a vector
-      paddedsig = as.matrix(c(padstart, data, padend)) #zero padded signal
+    groupdelay = (length(coefficients)-1)/2
+    padstart = trial[rep(1, groupdelay), ] #repeat first row n times
+    padend = trial[rep(nrow(trial), groupdelay), ] #repeat last row n times
+    if (dim(trial)[2] == 1) { #signal is only a vector
+      paddedsig = as.matrix(c(padstart, trial, padend)) #zero padded signal
     } else { #signal is a matrix with >= 2 cols
-      paddedsig = rbind(padstart, data, padend) #zero padded signal
+      paddedsig = rbind(padstart, trial, padend) #zero padded signal
     }    
     #apply filter:
-    temp = signal::filter(signal::Ma(b), paddedsig) #time-series with dims: [ 1, nrow*ncol ]
-    temp = matrix(temp, ncol=ncol(data)) #retransform into matrix
+    temp = signal::filter(coefficients, paddedsig) #time-series with dims: [ 1, nrow*ncol ]
+    temp = matrix(temp, ncol=ncol(trial)) #retransform into matrix
     fsignal = temp[(2*groupdelay+1):nrow(temp),] #remove padded data
     setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
     setNames( cbind(infocols, fsignal), colnames )
@@ -83,27 +153,27 @@ filter.apply <- function(data, b) {
 }
 
 
-data.freq_response <- function(data, cols=NULL, srate=500, 
-                               xlims=NULL, filt=F, title="") {
+plot.frequencies <- function(data, cols=NULL, srate=500, xlims=NULL, filt=F, 
+                             title="", ylab="Spectral Power Density (dB/Hz)") {
   ## plots the averaged frequency response for all measurement columns
+  ## y axis values are the spectral power density (db/Hz)
   #INPUT ---
-  #data: df or list of trial data
+  #data: df or list of trials, slices
   #cols: columns (channels) to average over, defaults to all that contain non-integer numeric values
   #srate: sampling rate of the data in Hz
-  #xlims: limit the frequency range to plot, default is c(1, srate/2)
+  #xlims: limit the frequency range to plot, default is c(0, srate/2)
   #filt: if True, the averaged freq response is low-pass filtered at 200Hz for visualization
   #title: optional title for the plot
-  
+  #ylab: y axis label
   data = data.check(data, aslist=F) #transform to df
-  if (is.null(cols)) { #defaults to all channels if nothing specified
+  if ( ncol(data) == 1 ) cols=1 #in case of vector
+  if ( is.null(cols) ) { #defaults to all channels if nothing specified
     data = data[, is.datacol(data)] #analzye only measurements 
     cols = 1:ncol(data)
   } else {
-      cols = cols[ is.datacol(data[,cols]) ] #analzye only measurements 
+    cols = cols[ is.datacol(data[,cols]) ] #analzye only measurements 
   }
-  if (is.null(xlims)) { 
-    xlims = c(1, srate/2) 
-  }
+  if ( is.null(xlims) ) xlims = c(0, srate/2)
   M = nrow(data/2 + 1)
   temp = sapply(cols, function(c) {
     X=abs(fft(data[,c])[1:M])^2 / (srate*nrow(data)) #time normalized
@@ -112,8 +182,8 @@ data.freq_response <- function(data, cols=NULL, srate=500,
   temp = 10*log10(temp) #dB conversion
   #note: 20log10(V) is equivalent to 10log10(V^2) [V=Voltage magnitude]
   avgspec = rowMeans(temp) #averaged over all channels
-  if (filt) { #apply 200Hz lowpass for visualization:
-    b = filter.get_coeffs(225,50,"low",nrow(data))
+  if ( filt && nrow(data)>=450 ) { #apply 200Hz lowpass for visualization:
+    b = filter.coefficients(225,50,"low",nrow(data))
     avgspec = filter.apply(avgspec, b)[,1] #unroll matrix
     #note: don't filter if you want to see line noise
   }
@@ -121,7 +191,7 @@ data.freq_response <- function(data, cols=NULL, srate=500,
   xAxis = xAxis[xAxis >= xlims[1] & xAxis <= xlims[2]]
   plot(xAxis, avgspec, type="l", las=1,
        col=rgb(0,0.4470,0.7410), xlim=xlims, lwd=1.5,
-       xlab="Frequency (Hz)", ylab="Spectral power density (dB/Hz)", main=title)
+       xlab="Frequency (Hz)", ylab=ylab, main=title)
 }
 
 
