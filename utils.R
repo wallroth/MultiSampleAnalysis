@@ -1,29 +1,5 @@
 ## UTILITIES: often needed helper functions
 
-data.set_type <- function(data) {
-  if ( !is.null( attr(data, "type") ) && 
-       attr(data, "type") %in% c("trials", "slices", "subjects") ) {
-    return(data)
-  }
-  if ( class(data) == "list" ) {
-    if ( class(data[[1]]) == "list" ) { #nested list, perhaps subject data
-      data = lapply( data, data.check, aslist=F )
-    }
-    if ( !.is.sliced(data) ) { #trial list
-      attr(data, "type") = "trials"
-    } else { #slice or subject list
-      #if subject list, "overlap" will be identical to sample num
-      overlap = sum( unique( data[[1]][,1] ) %in% unique( data[[2]][,1] ) )
-      if ( overlap %in% c( data.get_samplenum(data[[1]]), data.get_samplenum(data[[2]]) ) ) {
-        attr(data, "type") = "subjects"
-      } else {
-        attr(data, "type") = "slices"
-      }
-    }
-  }
-  return(data)
-}
-
 is.datacol <- function(data, tol = .Machine$double.eps^0.5) {
   ## check if columns of data are measurements (floating numbers)
   ## used to exclude info columns in a df (e.g. sample number, outcome)
@@ -37,16 +13,54 @@ is.datacol <- function(data, tol = .Machine$double.eps^0.5) {
   })
 }
 
-.is.sliced <- function(data) {
-  ## check if data is a slice list: fewer unique sample numbers than rows
-  if ( class(data) == "list" && length(data) > 1 && class(data[[1]]) == "data.frame" ) {
-    nsamples = data.get_samplenum( data[[1]] )
-    return( nrow(data[[1]]) != nsamples ) #TRUE if sliced
+data.set_type <- function(data) {
+  ## automatic type detection for lists. non-lists are returned without action
+  ## if type is already set, returns immediately
+  ## distinction can be problematic for lists of slices and subjects
+  ## current decision is based on the following criteria:
+  # trial list: 
+  #   - if the unique sample numbers match nrow in the 1st list element
+  # subject list: 
+  #   - if overlapping samples between 1st and 2nd list element correspond to nrow
+  #   - or if the outcome is in non-identical order (highly likely)
+  # slice list: 
+  #   - overlapping samples must be smaller than sample number,
+  #   - outcome should be in identical order between slices
+  ## the outcome is checked as well because sample numbering might vary across
+  ## subject data sets (for whatever reason); in the very unusual scenario
+  ## of an identical outcome order between the 1st and 2nd subject, the list
+  ## will be fasely identified as slices and should instead be set manually
+  ## likewise, a slice list which was created by hand should have constant outcome order
+  ## otherwise it will be falsely identified as subjects
+  if ( any( c("trials", "slices", "subjects") %in% attr(data, "type") ) ) {
+    return(data)
   }
-  return(FALSE) #not a list
+  if ( class(data) == "list" ) {
+    if ( class(data[[1]]) == "list" ) { #nested list, perhaps subject data
+      data = lapply( data, data.check, aslist=F )
+    }
+    #get sample number of 1st and 2nd list element
+    nsamples = c( data.samplenum(data[[1]]), data.samplenum(data[[2]]) )
+    if ( identical( nrow(data[[1]]), nsamples[1] ) ) { #trial list
+      #unique sample numbers match row number
+      attr(data, "type") = "trials" 
+    } else { #slice or subject list
+      #if slice list, "overlap" cannot be identical to sample number
+      #because subject data could have non-overlapping sample numbers, 
+      #also check if outcome has the same order in 1st and 2nd element (unlikely for subject data)
+      overlap = sum( unique( data[[1]][,1] ) %in% unique( data[[2]][,1] ) )
+      if ( overlap %in% nsamples || !identical( data[[1]][seq( 1, nrow(data[[1]]), by=nsamples[1] ), 2], 
+                                                data[[2]][seq( 1, nrow(data[[2]]), by=nsamples[2] ), 2] ) ) {
+        attr(data, "type") = "subjects"
+      } else { #slice list
+        attr(data, "type") = "slices"
+      }
+    }
+  }
+  return(data)
 }
 
-data.append_info <- function(data, trials=NULL, outcome=NULL) {
+data.set_info <- function(data, trials=NULL, outcome=NULL) {
   ## function to append required info columns (sample numbers and/or outcome) to raw data
   ## which only contains measurements (or at least not the required info cols)
   #INPUT ---
@@ -61,7 +75,7 @@ data.append_info <- function(data, trials=NULL, outcome=NULL) {
     if ( !is.null(outcome) ) {
       warning( "You are appending identical outcome info to every subject data set in the list." )
     }
-    data = lapply( data, data.append_info, trials=trials, outcome=outcome )
+    data = lapply( data, data.set_info, trials=trials, outcome=outcome )
     attr(data, "type") = "subjects"
     return(data)
   }
@@ -83,7 +97,7 @@ data.append_info <- function(data, trials=NULL, outcome=NULL) {
       stop( "No sample numbers found in 1st column and no trials specified.\n", 
             "Without proper trial info, outcome cannot be appended." )
     } else { #sample number is present in df
-      nsamples = data.get_samplenum(data)
+      nsamples = data.samplenum(data)
       outcome = as.factor( rep( outcome, each=nsamples ) )
       if ( length(outcome) < nrow(data) ) {
         stop( "Length of the outcome must match number of trials." )
@@ -104,12 +118,12 @@ data.append_info <- function(data, trials=NULL, outcome=NULL) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) )
 }
 
-data.get_samplenum <- function(data) {
+data.samplenum <- function(data) {
   ## helper function to retrieve sample numbers per trial
   ## data is expected to have trials of equal length and ordering
   if ( is.datacol(data[,1]) ) {
     stop( "It seems your data does not have sample numbers in its first column.\n", 
-          "Please provide that information. Use data.append_info at your convenience." )
+          "Please provide that information. Use data.set_info at your convenience." )
   }
   samples = unique(data[,1]); nsamples = length(samples)
   if ( !isTRUE(all.equal( rep( samples, nrow(data)/nsamples ), data[,1] )) ) {
@@ -118,37 +132,6 @@ data.get_samplenum <- function(data) {
           "or your trials are not of equal length. Please meet these assumptions." )
   }
   return( nsamples )
-}
-
-data.trials.split <- function(data, strip=T) {
-  ## transform data into a list of trials according to sample numbering (1st col)
-  ## returns a list of dfs with each element corresponding to a single trial
-  ## sets the attribute "type" to "trials"
-  #INPUT ---
-  #strip: non-numeric columns are stripped (e.g. sample numbers, outcome)
-  
-  ## make sure data is a df 
-  # can't call data.check because it might interfere with .transformed of previous call!
-  data = data.set_type(data)
-  if ( "trials" %in% attr(data, "type") ) return(data)
-  if ( "slices" %in% attr(data, "type") ) {
-    data = .data.unslice(data)
-  } else if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.trials.split, strip=strip) #iterate the subjects
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  data = as.data.frame(data) #in case of matrix
-  ##
-  nsamples = data.get_samplenum(data) #1st col with sample info required
-  trials = findInterval(1:nrow(data), seq(1, nrow(data), by=nsamples))  
-  if (strip) {
-    trialdata = split(data[, is.datacol(data)], trials)
-  } else {
-    trialdata = split(data, trials)
-  }
-  attr(trialdata, "type") = "trials"
-  return( trialdata )
 }
 
 data.check <- function(data, aslist=T, strip=F, transform=T) {
@@ -170,7 +153,7 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
   if (aslist) {
     if ( class(data) != "list" ) { #if not a list
       .transformed <<- TRUE
-      return( data.trials.split(data, strip=strip) ) #transform to trial list 
+      return( data.split_trials(data, strip=strip) ) #transform to trial list 
     }
     if ( strip ) { #even if a list strip non-data cols
       #FIX: possible misidentification in cases with only 1 sample per trial
@@ -197,81 +180,38 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
   return(data)  
 }
 
-data.trials.normalize <- function(data, start=NULL, end=NULL, scale=F) {
-  ## remove the mean of a range of data points from the other samples of a trial
-  ## generally used to subtract the average of a baseline period, i.e. 1:baseline_end
+data.split_trials <- function(data, strip=F) {
+  ## transform data into a list of trials according to sample numbering (1st col)
+  ## returns a list of dfs with each element corresponding to a single trial
+  ## sets the attribute "type" to "trials"
   #INPUT ---
-  #data: continuous df or list of trials, returns data in the same format
-  #start: first sample of the range to subtract, defaults to first sample of the trial
-  #end: last sample of the range, defaults to last sample of the trial
-  #scale: if True, data is both centered and scaled, otherwise only centered
-  data = data.check(data, aslist=T, strip=F) #transform to list
-  if ( "slices" %in% attr(data, "type") ) {
-    data = data.trials.split( data, strip=F )
-    .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.trials.normalize, start=start, end=end, scale=scale)
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  nsamples = data.get_samplenum(data[[1]])
-  if ( is.null(start) || start < 1 ) start = 1
-  if ( is.null(end) || end > nsamples ) end = nsamples
-  dcol = is.datacol(data[[1]])
-  normdata = lapply(data, function(trial) {
-    normalized = scale(trial[start:end, dcol], scale=scale)
-    if ( !identical(end, nsamples) ) {
-      #normalize only via a baseline
-      if (scale) {
-        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
-                     attr(normalized,"scaled:center"), attr(normalized,"scaled:scale"))
-      } else {
-        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
-                     attr(normalized,"scaled:center"), scale=F)
-      }
-      normalized =  rbind( temp[0:(start-1), , drop=F], #pre-baseline samples
-                           normalized, #baseline samples
-                           temp[start:nrow(temp), , drop=F] ) #post-baseline samples
-    }
-    setNames( data.frame( trial[, !dcol], normalized ), names(trial) ) #return to lapply
-  })
-  return( data.check(normdata, aslist=F, transform=.transformed) ) #transform back to df if needed
-}
-
-data.trials.remove_samples <- function(data, start=1, end, relabel=T) {
-  ## remove datapoints from trials, specified by sample number (1st col)
-  ## can be used e.g. to remove a baseline before analysis
-  #INPUT ---
-  #data: continuous df or list of trials, slices, subjects
-  #start: first sample to remove, defaults to first sample of the trial
-  #end: last sample to remove (end of the range to remove)
-  #start and end correspond to positions and not to the actual values in the column
-  #relabel: if True, adapts 1st col to the new sample number (from 1:last sample)
+  #strip: non-numeric columns are stripped (e.g. sample numbers, outcome)
+  
+  ## make sure data is a df 
+  # can't call data.check because it might interfere with .transformed of previous call!
   data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.trials.remove_samples, start=start, end=end, relabel=relabel )
+  if ( "trials" %in% attr(data, "type") ) return(data)
+  if ( "slices" %in% attr(data, "type") ) {
+    data = .data.unslice(data)
+  } else if ( "subjects" %in% attr(data, "type") ) {
+    data = lapply(data, data.split_trials, strip=strip) #iterate the subjects
     attr(data, "type") = "subjects"
     return(data)
   }
-  data = data.check(data, aslist=F) #transform to df
-  nsamples = data.get_samplenum(data)
-  if ( nsamples <= 1 ) stop( "Only 1 sample per trial found." )
-  if ( nsamples < end ) {
-    warning( "The specified end exceeds the sample numbers. ",
-             "Setting end to the last sample." )
-    end = nsamples
+  data = as.data.frame(data) #in case of matrix
+  ##
+  nsamples = data.samplenum(data) #1st col with sample info required
+  trials = findInterval(1:nrow(data), seq(1, nrow(data), by=nsamples))  
+  if (strip) {
+    trialdata = split(data[, is.datacol(data)], trials)
+  } else {
+    trialdata = split(data, trials)
   }
-  trialnum = nrow(data)/nsamples
-  #create idx in case sample numbering is discontinuous
-  sampleidx = rep( 1:nsamples, trialnum )
-  data = data[sampleidx<start | sampleidx>end,] #remove range
-  if (relabel) { #fix sample numbers to be continuous again
-    data[,1] = rep(1:( nsamples-end+start-1 ), trialnum) 
-  }
-  return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
+  attr(trialdata, "type") = "trials"
+  return( trialdata )
 }
 
-data.trials.slice <- function(data, window, overlap=0, split=T) {
+data.split_slices <- function(data, window, overlap=0, split=T) {
   ## group consecutive data points according to the specified window size into separate slices
   ## i.e. data points from different trials but same time intervals are grouped together 
   ## does several control checks to prevent unwanted results
@@ -291,12 +231,12 @@ data.trials.slice <- function(data, window, overlap=0, split=T) {
   #within each list element is a df with the grouped samples across different trials
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.trials.slice, window=window, overlap=overlap, split=split )
+    data = lapply( data, data.split_slices, window=window, overlap=overlap, split=split )
     if (split)  attr(data, "type") = "subjects"
     return(data)
   }
   data = data.check(data, aslist=F) #transform to df
-  nsamples = data.get_samplenum(data)
+  nsamples = data.samplenum(data)
   if ( window >= nsamples ) {
     stop( "Window must be smaller than the number of samples per trial." )
   }
@@ -309,7 +249,7 @@ data.trials.slice <- function(data, window, overlap=0, split=T) {
     frac = (nsamples/window) %% 1
     if ( frac > 0) {
       cat( "Slices are not of equal length. Last slice contains only ", 
-          round(frac*100), "% of the samples relative to the other slices.\n", sep="" )
+           round(frac*100), "% of the samples relative to the other slices.\n", sep="" )
     }    
     #slice for a single trial:
     slice = findInterval(1:nsamples, c(seq(1, nsamples, by=window), Inf))
@@ -386,7 +326,81 @@ data.trials.slice <- function(data, window, overlap=0, split=T) {
   return(data)
 }
 
-data.reduce_levels <- function(data, labels, col=2) {
+data.normalize <- function(data, start=NULL, end=NULL, scale=F) {
+  ## remove the mean of a range of data points from the other samples of a trial
+  ## generally used to subtract the average of a baseline period, i.e. 1:baseline_end
+  #INPUT ---
+  #data: continuous df or list of trials, returns data in the same format
+  #start: first sample of the range to subtract, defaults to first sample of the trial
+  #end: last sample of the range, defaults to last sample of the trial
+  #scale: if True, data is both centered and scaled, otherwise only centered
+  data = data.check(data, aslist=T, strip=F) #transform to list
+  if ( "slices" %in% attr(data, "type") ) {
+    data = data.split_trials( data, strip=F )
+    .transformed = T #convert to df at the end
+  } else if ( "subjects" %in% attr(data, "type") ) {
+    data = lapply(data, data.normalize, start=start, end=end, scale=scale)
+    attr(data, "type") = "subjects"
+    return(data)
+  }
+  nsamples = data.samplenum(data[[1]])
+  if ( is.null(start) || start < 1 ) start = 1
+  if ( is.null(end) || end > nsamples ) end = nsamples
+  dcol = is.datacol(data[[1]])
+  normdata = lapply(data, function(trial) {
+    normalized = scale(trial[start:end, dcol], scale=scale)
+    if ( !identical(end, nsamples) ) {
+      #normalize only via a baseline
+      if (scale) {
+        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
+                     attr(normalized,"scaled:center"), attr(normalized,"scaled:scale"))
+      } else {
+        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
+                     attr(normalized,"scaled:center"), scale=F)
+      }
+      normalized =  rbind( temp[0:(start-1), , drop=F], #pre-baseline samples
+                           normalized, #baseline samples
+                           temp[start:nrow(temp), , drop=F] ) #post-baseline samples
+    }
+    setNames( data.frame( trial[, !dcol], normalized ), names(trial) ) #return to lapply
+  })
+  return( data.check(normdata, aslist=F, transform=.transformed) ) #transform back to df if needed
+}
+
+data.remove_samples <- function(data, start=1, end, relabel=T) {
+  ## remove datapoints from trials, specified by sample number (1st col)
+  ## can be used e.g. to remove a baseline before analysis
+  #INPUT ---
+  #data: continuous df or list of trials, slices, subjects
+  #start: first sample to remove, defaults to first sample of the trial
+  #end: last sample to remove (end of the range to remove)
+  #start and end correspond to positions and not to the actual values in the column
+  #relabel: if True, adapts 1st col to the new sample number (from 1:last sample)
+  data = data.set_type(data)
+  if ( "subjects" %in% attr(data, "type") ) {
+    data = lapply( data, data.remove_samples, start=start, end=end, relabel=relabel )
+    attr(data, "type") = "subjects"
+    return(data)
+  }
+  data = data.check(data, aslist=F) #transform to df
+  nsamples = data.samplenum(data)
+  if ( nsamples <= 1 ) stop( "Only 1 sample per trial found." )
+  if ( nsamples < end ) {
+    warning( "The specified end exceeds the sample numbers. ",
+             "Setting end to the last sample." )
+    end = nsamples
+  }
+  trialnum = nrow(data)/nsamples
+  #create idx in case sample numbering is discontinuous
+  sampleidx = rep( 1:nsamples, trialnum )
+  data = data[sampleidx<start | sampleidx>end,] #remove range
+  if (relabel) { #fix sample numbers to be continuous again
+    data[,1] = rep(1:( nsamples-end+start-1 ), trialnum) 
+  }
+  return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
+}
+
+data.remove_classes <- function(data, labels, col=2) {
   ## function to reduce the outcome factor to fewer levels
   ## subset multiclass data into binary data according to specified labels for 1 vs 1 classification
   #INPUT ---
@@ -397,7 +411,7 @@ data.reduce_levels <- function(data, labels, col=2) {
   #a subset of the original data with only the specified class labels
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.reduce_levels, labels=labels, col=col )
+    data = lapply( data, data.remove_classes, labels=labels, col=col )
     attr(data, "type") = "subjects"
     return(data)
   }
@@ -409,9 +423,9 @@ data.reduce_levels <- function(data, labels, col=2) {
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }
 
-data.collapse_levels <- function(data, labels, new_labels=NULL, col=2, verbose=T) {
+data.merge_classes <- function(data, labels, new_labels=NULL, col=2, verbose=T) {
   ## function to collapse specified factor labels
-  ## preferable choice over data.reduce_levels if you want to keep all samples 
+  ## preferable choice over data.remove_classes if you want to keep all samples 
   ## and some factor levels are more similar than others
   #INPUT ---
   #data: continuous df or list of trials, slices, subjects
@@ -427,7 +441,7 @@ data.collapse_levels <- function(data, labels, new_labels=NULL, col=2, verbose=T
   #note: label 0 will be avoided as a label for the merged classes
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.collapse_levels, labels=labels, new_labels=new_labels, col=col, verbose=verbose )
+    data = lapply( data, data.merge_classes, labels=labels, new_labels=new_labels, col=col, verbose=verbose )
     attr(data, "type") = "subjects"
     return(data)
   }
@@ -474,7 +488,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   }
   data = data.set_type(data)
   if ( "slices" %in% attr(data, "type") ) {
-    trialdata = data.trials.split( data, strip=T )
+    trialdata = data.split_trials( data, strip=T )
     .transformed = T #convert to df at the end
   } else if ( "subjects" %in% attr(data, "type") ) {
     data = lapply(data, data.remove_outliers, Q=Q, IQR=IQR, C=C, plot=plot)
@@ -504,7 +518,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
     }
   }
   # return data without the outlier trials + info as attributes
-  data = data.trials.split(data, strip=F) #get trialdata with info columns
+  data = data.split_trials(data, strip=F) #get trialdata with info columns
   if ( length(outliers) < 1 ) { #no outliers
     outliers = 0
     data = data.check( data, aslist=F, transform=.transformed )

@@ -25,7 +25,7 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
     attr(data, "type") = "subjects"
     return(data)
   }
-  nsamples = data.get_samplenum(data[[1]])
+  nsamples = data.samplenum(data[[1]])
   frac = MASS::fractions(new.srate/old.srate)
   #calculate zero pad length:
   #note: by using fraction, rounding error accumulation is minimized
