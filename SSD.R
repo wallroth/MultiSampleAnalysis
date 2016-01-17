@@ -107,10 +107,8 @@ SSD.pipeline <- function(data, ..., plot = T, nCores = NULL) {
   }
   #do the SSD:
   SSD.out = SSD.apply(SSDdata)
-  rank = list(...)$rank #get rank information for denoise
-  if ( is.null(rank) ) rank = .1 #auto selection with q=0.1
-  data = SSD.denoise(SSD.out, rank)
-  #return denoised data
+  #denoise data:
+  data = SSD.denoise(SSD.out, list(...)$rank)
   return(data)
 }
 
@@ -281,7 +279,7 @@ SSD.apply <- function(SSDdata, nCores = NULL) {
   return(output)
 }
 
-SSD.denoise <- function(SSD, rank, nCores = NULL) {
+SSD.denoise <- function(SSD, rank=NULL, nCores = NULL) {
   ## low-rank factorization to denoise measurements with SSD filters: X*W*A'
   ## necessary if subsequent analyses should be performed in original input space
   ## e.g. to interpret topographies (cf. Haufe et al., 2014)
@@ -305,13 +303,18 @@ SSD.denoise <- function(SSD, rank, nCores = NULL) {
     return(data)
   }
   if ( !"SSD.result" %in% attr(SSD, "type") ) stop( "Please supply the output of SSD.apply." )
-  if ( rank > ncol(SSD$components) ) stop( "Rank cannot be larger than the number of measurement columns." )
+  if ( is.null(rank) ) {
+    rank = .1 #default q=0.1 for auto-selection
+  } else if ( rank > ncol(SSD$components) ) {
+    stop( "Rank cannot be larger than the number of measurement columns." )
+  }
   if ( rank < 1 ) {
     #auto-select q*IQR(lambda) + 75th.percentile(lambda), but at least 1 component
     rank = max(1, sum( SSD$lambda >= rank*IQR(SSD$lambda)+quantile(SSD$lambda, probs=.75) ) )
     cat( "Auto-selection criterion yielded", rank, "components.\n" )
   }
-  data = as.matrix(SSD$components) %*% SSD$filters[,1:rank] %*% t(SSD$patterns[,1:rank])
+  #because components are already projected onto W, it is replaced by identity matrix
+  data = as.matrix(SSD$components) %*% diag(ncol(SSD$patterns))[,1:rank] %*% t(SSD$patterns[,1:rank])
   data = data.frame( SSD$info, data )
   attr(data, "rank") = rank
   return(data)
