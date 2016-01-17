@@ -55,7 +55,7 @@
 #5. obtain SSD components by projecting data onto the weights. Dimensionality can be reduced 
 # by choosing only the first few components (ordered like in PCA)
 
-SSD.pipeline <- function(data, ..., plot = T, nCores = NULL) {
+SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   ## Pipeline for the whole SSD procedure which takes care of the sequence
   ## of functions to execute; especially shines with subject data sets
   ## as the full paradigm gets parallelized. However, only the denoised
@@ -181,7 +181,7 @@ SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
   return(SSDdata)
 }
 
-SSD.apply <- function(SSDdata, nCores = NULL) {
+SSD.apply <- function(SSDdata, nCores=NULL) {
   ## Spatio-Spectral decomposition (SSD), cf. Nikulin et al. 2011
   ## extraction of neuronal oscilations with improved SNR
   #NOTES ---
@@ -279,7 +279,7 @@ SSD.apply <- function(SSDdata, nCores = NULL) {
   return(output)
 }
 
-SSD.denoise <- function(SSD, rank=NULL, nCores = NULL) {
+SSD.denoise <- function(SSD, rank=NULL, nCores=NULL) {
   ## low-rank factorization to denoise measurements with SSD filters: X*W*A'
   ## necessary if subsequent analyses should be performed in original input space
   ## e.g. to interpret topographies (cf. Haufe et al., 2014)
@@ -289,7 +289,7 @@ SSD.denoise <- function(SSD, rank=NULL, nCores = NULL) {
   #rank: rank to approximate, < ncol(X); if = ncol(X), just a back-projection
   #      if < 1, the auto-selection criterion from Haufe et al., 2014 is applied:
   #      all components whose lambda is >= q*IQR(lambda) + 75th.percentile(lambda)
-  #      where rank will substitute q
+  #      where rank will substitute q; if NULL, defaults to auto-select with q=0.1
   #NOTES ---
   #X*W*A^T = X*W*W^-T = X*I
   #RETURNS ---
@@ -313,8 +313,8 @@ SSD.denoise <- function(SSD, rank=NULL, nCores = NULL) {
     rank = max(1, sum( SSD$lambda >= rank*IQR(SSD$lambda)+quantile(SSD$lambda, probs=.75) ) )
     cat( "Auto-selection criterion yielded", rank, "components.\n" )
   }
-  #because components are already projected onto W, it is replaced by identity matrix
-  data = as.matrix(SSD$components) %*% diag(ncol(SSD$patterns))[,1:rank] %*% t(SSD$patterns[,1:rank])
+  #because components are already projected onto W, it is not needed here
+  data = as.matrix(SSD$components[,1:rank]) %*% t(SSD$patterns[,1:rank])
   data = data.frame( SSD$info, data )
   attr(data, "rank") = rank
   return(data)
