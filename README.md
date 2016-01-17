@@ -11,7 +11,6 @@ Description: This package provides various tools to preprocess, transform and an
 
 ToDo: extensive documentation to be able to compile a library
 
-for now, use with:
+for now, use with: source("decode.R") 
 
-source("myFuncs.R"); 
-.loadFuncs(util=T, filt=T, ML=T, CSP=T, SSD=T, plot=T) # to load everything
+Functions are loaded into their own environments so they won't appear in your workspace.
