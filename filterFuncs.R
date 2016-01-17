@@ -15,12 +15,12 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
   require(utils, quietly=T); .eval_package("MASS")
   data = data.check(data, aslist=T, strip=F) #transform to list
   if ( "slices" %in% attr(data, "type") ) {
-    data = data.trials.split( data, strip=F )
+    data = data.split_trials( data, strip=F )
     .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) {
+  } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
     data = foreach(d=data, .combine=list, .multicombine=T) %dopar%
-      data.resample(d, old.srate=old.srate, new.srate=new.srate)
+      data.resample(d, old.srate, new.srate)
     .parallel_check(output=pcheck)
     attr(data, "type") = "subjects"
     return(data)
@@ -60,7 +60,7 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
   return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
 }
 
-filter.coefficients <- function(frequencies, transwidth, ftype, srate=500, wtype="hamming") {
+filter.coefficients <- function(frequencies, transwidth, ftype, srate, wtype="hamming") {
   ## creates windowed sinc FIR filter coefficients for the given frequency
   #INPUT ---
   #frequencies: scalar (high/lowpass) or tuple (bandpass/stop) to specify freq (range)
@@ -95,7 +95,7 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
   ## uses zero-phase one-pass filtering approach within trials 
   #INPUT ---
   #data: df, matrix, vector or list of trials, slices, subjects
-  #b: filter coefficients, e.g. from filter.coefficients
+  #coefficients: filter coefficients, e.g. from filter.coefficients
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        can also be an already registered cluster object
@@ -106,14 +106,15 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
   #filtered data
   require(utils, quietly=T);  .eval_package("signal")
   if ( class(data) == "numeric" ) { #vector to df in a list
-    data = list( as.data.frame(data) ) #camouflaged as trial list
-    .transformed = TRUE
+    data = list( as.data.frame(data) ) 
+    attr(data, "type") = "trials" #camouflaged as trial list
+    attr(data, "toVec") = T #retransform later
   }
   data = data.check(data, aslist=T, strip=F) #transform to list
   if ( "slices" %in% attr(data, "type") ) {
-    data = data.trials.split( data, strip=F )
+    data = data.split_trials( data, strip=F )
     .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) {
+  } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
     data = foreach(d=data, .combine=list, .multicombine=T) %dopar%
       filter.apply(d, coefficients)
@@ -149,22 +150,27 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
     setNames( cbind(infocols, fsignal), colnames )
   })
   close(progBar)
+  if ( !is.null(attr(data, "toVec")) ) return( filtdata[[1]][,1] ) #return as vector
   return( data.check(filtdata, aslist=F, transform=.transformed) )
 }
 
 
-plot.frequencies <- function(data, cols=NULL, srate=500, xlims=NULL, filt=F, 
+plot.frequencies <- function(data, srate, cols=NULL, xlims=NULL, filt=F, plot=T, 
                              title="", ylab="Spectral Power Density (dB/Hz)") {
-  ## plots the averaged frequency response for all measurement columns
-  ## y axis values are the spectral power density (db/Hz)
+  ## computes the averaged frequency response for all measurement columns
+  ## values are the spectral power density (db/Hz)
   #INPUT ---
   #data: df or list of trials, slices
   #cols: columns (channels) to average over, defaults to all that contain non-integer numeric values
   #srate: sampling rate of the data in Hz
-  #xlims: limit the frequency range to plot, default is c(0, srate/2)
+  #xlims: limit the frequency range to plot, default is the full range (0:srate/2)
   #filt: if True, the averaged freq response is low-pass filtered at 200Hz for visualization
+  #plot: if True, the frequency response is plotted. Else, the values are returned
   #title: optional title for the plot
   #ylab: y axis label
+  #RETURNS ---
+  #either nothing and the function directly plots (if plot=T) or the computed 
+  #spectral power density with names corresponding to the frequency position
   data = data.check(data, aslist=F) #transform to df
   if ( ncol(data) == 1 ) cols=1 #in case of vector
   if ( is.null(cols) ) { #defaults to all channels if nothing specified
@@ -184,14 +190,19 @@ plot.frequencies <- function(data, cols=NULL, srate=500, xlims=NULL, filt=F,
   avgspec = rowMeans(temp) #averaged over all channels
   if ( filt && nrow(data)>=450 ) { #apply 200Hz lowpass for visualization:
     b = filter.coefficients(225,50,"low",nrow(data))
-    avgspec = filter.apply(avgspec, b)[,1] #unroll matrix
+    avgspec = filter.apply(avgspec, b)
     #note: don't filter if you want to see line noise
   }
   avgspec = avgspec[xAxis >= xlims[1] & xAxis <= xlims[2]]
   xAxis = xAxis[xAxis >= xlims[1] & xAxis <= xlims[2]]
-  plot(xAxis, avgspec, type="l", las=1,
-       col=rgb(0,0.4470,0.7410), xlim=xlims, lwd=1.5,
-       xlab="Frequency (Hz)", ylab=ylab, main=title)
+  if (plot) {
+    plot(xAxis[ xAxis >= xlims[1] & xAxis <= xlims[2] ], 
+         avgspec[ xAxis >= xlims[1] & xAxis <= xlims[2] ], 
+         type="l", las=1, col="#0072BD", xlim=xlims, lwd=1.5,
+         xlab="Frequency (Hz)", ylab=ylab, main=title)
+  } else { #return the values
+    return( setNames(avgspec, xAxis) )
+  }
 }
 
 

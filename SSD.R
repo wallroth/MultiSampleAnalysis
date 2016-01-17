@@ -34,8 +34,7 @@
 # note: given A, we can also compute W = Cx^-1 * A * Cs
 # if signals/components are uncorrelated (orthogonal): A = Cx * W
 
-
-### Steps of analysis in the SSD/SPoC framework:
+## Steps in the SSD framework:
 #1. narrow bandpass filtering of target frequency, e.g. freq = 10-12; width=2
 # this yields matrix Xs (signal) but includes noise
 # width should be small (1-2 Hz) for better linear estimation of SNR
@@ -55,41 +54,64 @@
 # generalized eigenvalue decomposition: Cs*w = λCn*w
 #5. obtain SSD components by projecting data onto the weights. Dimensionality can be reduced 
 # by choosing only the first few components (ordered like in PCA)
-#6. apply SPoC to SSD components
 
-pipe.SSD <- function(data, ..., plotfreq = T, lowrank = NULL) {
-  ## Pipeline for the whole SSD procedure
+SSD.pipeline <- function(data, ..., plot = T, nCores = NULL) {
+  ## Pipeline for the whole SSD procedure which takes care of the sequence
+  ## of functions to execute; especially shines with subject data sets
+  ## as the full paradigm gets parallelized. However, only the denoised
+  ## data is returned, i.e. no other SSD output. For access to the full SSD
+  ## output, refer to the individual functions. The most time consuming
+  ## step in the paradigm is the temporal filtering of signal and noise
+  ## i.e. the call to SSD.filter. If there is need to repeatedly access
+  ## these two, it is computationally much more efficient to call the SSD
+  ## functions separately. Such may be the case if the SSD procedure
+  ## is nested within a cross-validation loop which repeatedly splits the data.
+  ## As the filtering is done within trials there is no harm in pre-filtering
+  ## the full data set(s) and thus executing the filter step only once.
   #INPUT ---
-  #data: continuous df or list of trials
+  #data: continuous df or list of trials, slices, subjects
   #frequencies, transwidth, srate: see SSD.coefficients
-  #plotfreq: if True, frequency response of Signal/Noise is plotted
-  #lowrank: int, if specified, SSD output is used to denoise measurements by low-rank
-  #         factorization (measurements are then in original sensor space unlike components!)
+  #plot: if True, frequency response of Signal/Noise is plotted (only if not parallelized)
+  #rank: see SSD.denoise; if not supplied, defaults to q=0.1 for the auto-selection criterion
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
   #RETURNS ---
-  #same as SSD; if lowrank was specified additionally the denoised data
-  
+  #the denoised data as a data frame. Attribute "rank" is added to indicate
+  #rank after denoising (useful if auto-selection was chosen)
+  data = data.set_type(data)
+  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    data = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      do.call(SSD.pipeline, utils::modifyList( list(data=d, plot=F), list(...) ))
+    .parallel_check(output=pcheck)
+    data = setNames( data, paste0("subject", seq_along(data)) )
+    attr(data, "type") = "subjects"
+    return(data)
+  }
+  #get the filter coefficients:
   args.in = .eval_ellipsis("SSD.coefficients", ...)
-  #get the filters:
-  SSDfilts = do.call(SSD.coefficients, args.in)
+  SSDcoeffs = do.call(SSD.coefficients, args.in)
   #get signal and noise:
-  Xs_Xn = SSD.filter(data, SSDfilts)
-  if (plotfreq) { #plot frequency response for Signal and Noise
-    freqs = args.in$frequencies[1:2]
-    args.in = .eval_ellipsis("data.freq_response", ...)
-    par(mfrow=c(2,1))
-    do.call(data.freq_response, modifyList( args.in, list(data=Xs_Xn$signal, filt=T, title="Signal") ))
-    abline(v = freqs, lty=2, col="red")
-    do.call(data.freq_response, modifyList( args.in, list(data=Xs_Xn$noise, filt=T, title="Noise") ))
-    abline(v = freqs, lty=2, col="red")
-    par(mfrow=c(1,1))
+  SSDdata = SSD.filter(data, SSDcoeffs)
+  if (plot) { #plot frequency response for Signal and Noise
+    signal = plot.frequencies(SSDdata$signal, args.in$srate, filt=T, plot=F)
+    noise = plot.frequencies(SSDdata$noise, args.in$srate, filt=T, plot=F)
+    plot(names(signal), signal, type="l", las=1, col="#0072BD", lwd=1.5,
+         xlab="Frequency (Hz)", ylab="Spectral Power Density (dB/Hz)", 
+         main="SSD: frequency response")
+    lines(names(noise), noise, col="#D95319", lwd=1.5)
+    abline(v=args.in$frequencies[1:2], col="grey", lty=2)
+    legend("topright", c("signal","noise"), 
+           col=c("#0072BD","#D95319"), lwd=1.5, bty="n")
   }
   #do the SSD:
-  SSDout = SSD.apply(Xs_Xn)
-  if ( !is.null(lowrank) ) {
-    SSDout$X_denoised = SSD.denoise(SSDout$X_SSD, SSDout$A_SSD, lowrank)
-  }
-  #return SSD output
-  return(SSDout)
+  SSD.out = SSD.apply(SSDdata)
+  rank = list(...)$rank #get rank information for denoise
+  if ( is.null(rank) ) rank = .1 #auto selection with q=0.1
+  data = SSD.denoise(SSD.out, rank)
+  #return denoised data
+  return(data)
 }
 
 SSD.coefficients <- function(frequencies, transwidth=1, srate, window="blackman") {
@@ -175,11 +197,12 @@ SSD.apply <- function(SSDdata, nCores = NULL) {
   #        if NULL, automatic selection; if 1, sequential execution
   #        can also be an already registered cluster object  
   #RETURNS ---
-  #W_SSD: spatial filters, demixing matrix W
-  #A_SSD: activation patterns, mixing matrix A
-  #X_SSD: SSD components, obtained by X*W (component space!)
-  #D_SSD: eigenvalues of the SSD components a.k.a. the power ratio corresponding
-  #       to the components (ordered like the components)
+  #components: SSD components, obtained by X*W (component space!)
+  #filters: spatial filters, demixing matrix W
+  #patterns: activation patterns, mixing matrix A
+  #lambda: eigenvalues of the SSD components a.k.a. the power ratio corresponding
+  #        to the components (ordered like the components)
+  #info: info columns which were stripped off data
   .eval_package("geigen")
   if ( "subjects" %in% attr(SSDdata, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(SSDdata), nCores=nCores)
@@ -282,7 +305,7 @@ SSD.denoise <- function(SSD, rank, nCores = NULL) {
     return(data)
   }
   if ( !"SSD.result" %in% attr(SSD, "type") ) stop( "Please supply the output of SSD.apply." )
-  if ( rank > ncol(SSD$components) ) stop( "Rank cannot be larger than the measurement columns." )
+  if ( rank > ncol(SSD$components) ) stop( "Rank cannot be larger than the number of measurement columns." )
   if ( rank < 1 ) {
     #auto-select q*IQR(lambda) + 75th.percentile(lambda), but at least 1 component
     rank = max(1, sum( SSD$lambda >= rank*IQR(SSD$lambda)+quantile(SSD$lambda, probs=.75) ) )
