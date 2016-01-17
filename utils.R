@@ -461,7 +461,7 @@ data.merge_classes <- function(data, labels, new_labels=NULL, col=2, verbose=T) 
       newlab = lab[1]
     }
     temp[ outcome %in% lab ] = newlab
-    if (verbose) cat("Collapsed factor levels", paste(as.character(lab),collapse=" & "), "to", newlab,"\n")
+    if (verbose) cat("Merged classes", paste(as.character(lab),collapse=" & "), "to", newlab,"\n")
   }
   #change labels in data
   data[, col] = as.factor(temp)
@@ -609,8 +609,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
     }
     #TEMP: export functions to clusters
     if ( length(output$CPUcluster) > 0 ) {
-      parallel::clusterEvalQ( output$CPUcluster, 
-         expr={ source("myFuncs.R"); .loadFuncs(util=T, filt=T, ML=T, CSP=T, SSD=T) } )  
+      parallel::clusterEvalQ( output$CPUcluster, expr={ source("decode.R") } )
     }
     cat( "Distributing", required, "jobs to", output$nCores, "workers . . .\n" )
     return(output) #list with CPUcluster and nCores
