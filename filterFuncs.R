@@ -92,15 +92,18 @@ filter.coefficients <- function(frequencies, transwidth, ftype, srate, wtype="ha
 
 filter.apply <- function(data, coefficients, nCores=NULL) {
   ## function to apply the filter coefficients b from filter.coefficients to the data
-  ## uses zero-phase one-pass filtering approach within trials 
+  ## for FIR filter uses zero-phase one-pass filtering
+  ## for IIR filter uses zero-phase two-pass filtering
+  ## in either case filtering is done within trials, i.e. boundaries are respected
   #INPUT ---
   #data: df, matrix, vector or list of trials, slices, subjects
-  #coefficients: filter coefficients, e.g. from filter.coefficients
+  #coefficients: filter coefficients, e.g. from filter.coefficients, signal::fir1, signal::butter
+  #              either of class 'Ma' (moving average) or class 'Arma' (autoregressive Ma)
+  #              if numeric, converted to class 'Ma' (FIR)
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        can also be an already registered cluster object
   #Notes ---
-  #tries to not filter across boundaries (trials)
   #only filters numeric non-integer data
   #RETURNS ---
   #filtered data
@@ -125,6 +128,9 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
   #obtain infocols with higher sample number by rebinding temporarily
   infoidx = !is.datacol( as.data.frame( data.table::rbindlist(data) ) )
   colnames = names(data[[1]]) #save variable names
+  if ( class(coefficients) != "Ma" && is.numeric(coefficients) ) {
+    coefficients = signal::Ma(coefficients) #assuming FIR 
+  }
   cat("Filtering:\n")
   progBar = txtProgressBar(style=3) #progress bar shown during filtering
   progBarsteps = seq( 1/length(data), 1, length.out=length(data) )
@@ -133,19 +139,27 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
     trial = data[[i]]
     infocols = trial[, infoidx] #info
     trial = as.matrix(trial[, !infoidx]) #measurements
-    #zero-padding to circumvent delay of filter when one-pass filtering:
-    groupdelay = (length(coefficients)-1)/2
-    padstart = trial[rep(1, groupdelay), ] #repeat first row n times
-    padend = trial[rep(nrow(trial), groupdelay), ] #repeat last row n times
-    if (dim(trial)[2] == 1) { #signal is only a vector
-      paddedsig = as.matrix(c(padstart, trial, padend)) #zero padded signal
-    } else { #signal is a matrix with >= 2 cols
-      paddedsig = rbind(padstart, trial, padend) #zero padded signal
-    }    
-    #apply filter:
-    temp = signal::filter(coefficients, paddedsig) #time-series with dims: [ 1, nrow*ncol ]
-    temp = matrix(temp, ncol=ncol(trial)) #retransform into matrix
-    fsignal = temp[(2*groupdelay+1):nrow(temp),] #remove padded data
+    if ( class(coefficients) == "Ma" ) { #FIR
+      #zero-padding to circumvent delay of filter when one-pass filtering:
+      groupdelay = (length(coefficients)-1)/2
+      padstart = trial[rep(1, groupdelay), ] #repeat first row n times
+      padend = trial[rep(nrow(trial), groupdelay), ] #repeat last row n times
+      if (dim(trial)[2] == 1) { #signal is only a vector
+        paddedsig = as.matrix(c(padstart, trial, padend)) #zero padded signal
+      } else { #signal is a matrix with >= 2 cols
+        paddedsig = rbind(padstart, trial, padend) #zero padded signal
+      }    
+      #apply filter:
+      temp = signal::filter(coefficients, paddedsig) #time-series with dims: [ 1, nrow*ncol ]
+      temp = matrix(temp, ncol=ncol(trial)) #retransform into matrix
+      fsignal = temp[(2*groupdelay+1):nrow(temp),] #remove padded data
+    } else if ( class(coefficients) == "Arma" ) { #IIR
+      #two-pass filtering forward/backward to avoid phase-delay
+      temp = signal::filtfilt(coefficients, trial)
+      fsignal = matrix(temp, ncol=ncol(trial)) #retransform into matrix
+    } else {
+      stop( "coefficients must be of class 'Ma' or 'Arma', cf. signal package." )
+    }
     setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
     setNames( cbind(infocols, fsignal), colnames )
   })
@@ -172,15 +186,14 @@ plot.frequencies <- function(data, srate, cols=NULL, xlims=NULL, filt=F, plot=T,
   #either nothing and the function directly plots (if plot=T) or the computed 
   #spectral power density with names corresponding to the frequency position
   data = data.check(data, aslist=F) #transform to df
-  if ( ncol(data) == 1 ) cols=1 #in case of vector
+  measurements = is.datacol(data)
   if ( is.null(cols) ) { #defaults to all channels if nothing specified
-    data = data[, is.datacol(data)] #analzye only measurements 
-    cols = 1:ncol(data)
+    cols = which(measurements)
   } else {
-    cols = cols[ is.datacol(data[,cols]) ] #analzye only measurements 
+    cols = cols[ measurements[cols] ] #analzye only measurements 
   }
   if ( is.null(xlims) ) xlims = c(0, srate/2)
-  M = nrow(data/2 + 1)
+  M = nrow(data)/2 + 1
   temp = sapply(cols, function(c) {
     X=abs(fft(data[,c])[1:M])^2 / (srate*nrow(data)) #time normalized
   })
