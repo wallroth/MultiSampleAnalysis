@@ -90,13 +90,13 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
     return(data)
   }
   #get the filter coefficients:
-  args.in = .eval_ellipsis("SSD.coefficients", ...)
+  args.in = list(...)
   SSDcoeffs = do.call(SSD.coefficients, args.in)
   #get signal and noise:
   SSDdata = SSD.filter(data, SSDcoeffs)
   if (plot) { #plot frequency response for Signal and Noise
-    signal = plot.frequencies(SSDdata$signal, args.in$srate, filt=T, plot=F)
-    noise = plot.frequencies(SSDdata$noise, args.in$srate, filt=T, plot=F)
+    signal = plot.frequencies(SSDdata$signal, args.in$srate, filt=F, plot=F)
+    noise = plot.frequencies(SSDdata$noise, args.in$srate, filt=F, plot=F)
     plot(names(signal), signal, type="l", las=1, col="#0072BD", lwd=1.5,
          xlab="Frequency (Hz)", ylab="Spectral Power Density (dB/Hz)", 
          main="SSD: frequency response")
@@ -108,11 +108,11 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   #do the SSD:
   SSD.out = SSD.apply(SSDdata)
   #denoise data:
-  data = SSD.denoise(SSD.out, list(...)$rank)
+  data = SSD.denoise(SSD.out, args.in$rank)
   return(data)
 }
 
-SSD.coefficients <- function(frequencies, transwidth=1, srate, window="blackman") {
+SSD.coefficients <- function(frequencies, noise.width=2, ...) {
   ## get SSD filter coefficients to be supplied to SSD.filter
   #INPUT ---
   #frequencies: 6 (or 2) values in this order:
@@ -121,33 +121,41 @@ SSD.coefficients <- function(frequencies, transwidth=1, srate, window="blackman"
   #   - Noise bandstop: low, high; between signal and noise bp, e.g. 9-13Hz
   #     e.g. frequencies = c(10,12,8,14,9,13)
   #   if only 2 values, they are assumed as signal bandpass specification
-  #transwidth: transition width in Hz for the filters to control roll-off
-  #srate: sampling rate of the data in Hz
-  #window: the windowing sinc function, default to the more restrictive blackman
+  #noise.width: defines the width of the unattenuated noise range
+  #             is used to calculate the noise band if only signal band is 
+  #             specified. Otherwise the value is ignored.
+  #transwidth, srate, wtype: see filter.coefficients
+  #transwidth will default to 1, wtype to blackman
   #RETURNS ---
   #a list with the filter coefficients for the three filtering steps of the SSD
   #i.e. signal bandpass, noise bandpass, noise bandstop
-  #Note: Noise defaults w.r.t. Signal to +/- 3 Hz bandpass and +/- 1 Hz bandstop
-  
+  #Note: at default settings, the noise edges will directly border on the signal edges
+  #      to minimize spectral leakage. The borders are determined via the transition width
+  args.coeff = .eval_ellipsis("filter.coefficients", ...)
+  if ( is.null(list(...)$wtype) ) { #if not specified...
+    args.coeff$wtype = "blackman" #default to blackman for smaller deviation
+  }
+  if ( is.null(list(...)$transwidth) ) {
+    args.coeff$transwidth = 1 #default to 1
+  }
   #check frequency specifications
-  if ( length(frequencies) == 2 ) {
-    cat( "Only signal bandpass frequencies specified. Assigning the others automatically:\n" )
-    frequencies[3] = frequencies[1] - 3
-    frequencies[4] = frequencies[2] + 3
-    cat( "Setting noise bandpass to",frequencies[3],"-",frequencies[4],"Hz.\n" )
-    frequencies[5] = frequencies[1] - 1
-    frequencies[6] = frequencies[2] + 1
-    cat( "Setting noise bandstop to",frequencies[5],"-",frequencies[6],"Hz.\n" )
+  if ( length(frequencies) == 2 ) { #only signal defined
+    cat( "Only signal bandpass frequencies specified. Defining noise correspondingly:\n" )
+    #frequency is at the center of the band, so transition width has to be considered
+    #minimized spectral leakage with the edges of the transition zones next to each other:
+    noise.bs = c( frequencies[1] - args.coeff$transwidth, frequencies[2] + args.coeff$transwidth )
+    noise.bp = c( noise.bs[1] - noise.width, noise.bs[2] + noise.width )
+    frequencies = c( frequencies, noise.bp, noise.bs )
+    cat( "Noise bandpass from",frequencies[3],"-",frequencies[4],"Hz ",
+         "and noise bandstop from",frequencies[5],"-",frequencies[6],"Hz.\n" )
   }
   if ( length(frequencies) != 6 ) { stop( "Incorrect frequency specification! ",
                                           "Set either 2 or 6 frequencies." ) }
   #get filter coefficients (b):
-  Xs_bandpass = filter.coefficients( frequencies[1:2], transwidth, "pass", srate, window )
-  Xn_bandpass = filter.coefficients( frequencies[3:4], transwidth, "pass", srate, window )
-  Xn_bandstop = filter.coefficients( frequencies[5:6], transwidth, "stop", srate, window )
-  return( list(Xs_bandpass=Xs_bandpass, 
-               Xn_bandpass=Xn_bandpass, 
-               Xn_bandstop=Xn_bandstop) )
+  signal.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[1:2], ftype="pass")) )
+  noise.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[3:4], ftype="pass")) )
+  noise.stop = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[5:6], ftype="stop")) )
+  return( list(signal.pass=signal.pass, noise.pass=noise.pass, noise.stop=noise.stop) )
 }
 
 SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
