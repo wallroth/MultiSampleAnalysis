@@ -471,6 +471,7 @@ plot.SpecCSP <- function(Spec.result, ylims=c(0,1), title="",
     classes = unique( Spec.result$outcome )
   } else { #no outcome info, simply number the classes
     classes = 1:(ncol(alpha)/attr(alpha, "npattern"))
+    if (length(classes) > 2) classes = classes[ 1:(length(classes)/2) ] #fix
   }
   if (is.null(cols)) { #manually set colours
     if ( length(classes) > 5 ) stop("More than 5 distinct outcomes. Please specify colours manually.")
