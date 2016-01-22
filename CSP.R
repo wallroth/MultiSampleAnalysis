@@ -1,334 +1,260 @@
-## Common spatial pattern algorithm, cf. Lemm et al. 2005, Blankertz et al. 2008
-# do temporal filterering before spatial filtering of CSP is applied 
+## recommended to do temporal filterering first to improve spatial filtering results
 
 # ToDo: implement regularization for CSP ? cf. Lu et al. 2010
 
-#make helper functions accessible
-source("myFuncs.R")
-
-pipe.CSP <- function(data, method="", frequencies=NULL, SSD=F, ...) {
-  ## function that creates CSP filters, or optionally SpecCSP filters, 
-  ## and validates the result with subsequent machine learning model fit
+data.project <- function(data, weights, approximate=T, logtransform=T) {
+  ## project measurements onto weights (spatial CSP/SpecCSP/SPoC filters)
+  ## the resulting features are an approximation of the "true" underlying signal,
+  ## i.e. with respect to an external target variable
+  ## the idea is to weight/filter channels that contain signal+noise in such a way
+  ## that hopefully only the signal of interest will be left, cf. Haufe et al. 2014, p.98
+  ## each projection captures a different spatial localization
   #INPUT ---
-  #data: df or list of trials expected with sample num in 1st col, binary outcome in 2nd col
-  #method: default is CSP, optionally "SpecCSP" or simply "Spec" (not case sensitive)
-  #frequencies: 2 frequency values defining a band-pass to filter the data, 
-  #      if unspecified, data is expected to be already bandpass filtered.
-  #SSD: if frequencies is specified and SSD is True, SSD will be applied instead of 
-  #     the standard bandpass filtering, calling pipe.SSD
-  #     note: it is advisable to set lowrank to obtain SSD denoised measurements 
-  #           e.g. lowrank = 15, so that the first 15 SSD filters will be used
-  #           if lowrank is not specified, the SSD components will be used which means
-  #           that subsequent analyses are performed in SSD space.
-  #           warning messages from CSP can be ignored as they correspond to the reduced rank
-  #IMPORTANT: specify also the srate if you want filtering/SSD!
-  #npattern, logtransform: see CSP.apply
-  #k, independent, shuffle: see data.folds.split
-  #NOTES ---
-  #further arguments correspond to the functions that are called optionally:
-  #if frequencies is defined: transwidth, srate; see filter.get_coeffs
-  #if method = "spec": p, q, prior, steps, srate; see SpecCSP.apply 
-  #if you repeat this procedure on the same data (e.g. for cross-validation purposes),
-  #it is more sensible to filter the data first and then loop over the filtered data, 
-  #instead of filtering the data again on every run.
-  #RETURNS ---
-  #a list with 3 named elements:
-  #summary: vector with the AUC value per fold
-  #ML: output of the machine learning functions, see data.fit_model
-  #CSP: output of the CSP method, see CSP.apply or SpecCSP.apply
-  source("myFuncs.R")
-  .loadFuncs(ML = T, CSP=T)
-  #if filtering is requested
-  if ( !is.null(frequencies) ) {
-    if ( !"srate" %in% names( list(...) ) ) {
-      warning( "Sampling rate (srate) is not set and will default to 500Hz. Please specify if otherwise." )
-    }
-    if (SSD) { # use SSD
-      .loadFuncs(SSD = T)
-      args.in = .eval_ellipsis("pipe.SSD", ...)
-      SSDout = do.call(pipe.SSD, modifyList( list(...), list(data = data, frequencies = frequencies ) ))
-      if ( is.null( args.in$lowrank ) ) { #use SSD components
-        # set threshold as 75th quantile + 0.1*IQR of power ratio
-        ncomps = sum( SSDout$D_SSD >= 0.1*IQR(SSDout$D_SSD)+quantile(SSDout$D_SSD)[4] )
-        warning( "Argument 'lowrank' is not specified. ", ncomps, " components have been automatically selected." )
-        X_denoised = SSD.denoise(SSDout$X_SSD, SSDout$A_SSD, k=ncomps)
-        data = cbind( data[, !is.datacol(data)], X_denoised )
-      } else { #use denoised measurements
-        data = cbind( data[, !is.datacol(data)], SSDout$X_denoised )
-      }
-      
-    } else if ( length(frequencies) != 2 ) {
-      stop( "2 frequencies need to be specified for the lower and upper limits of the bandpass." )
-    
-    } else { # use standard bandpass filtering
-      .loadFuncs(filt = T)
-      args.in = .eval_ellipsis("filter.get_coeffs", ...)
-      b = do.call(filter.get_coeffs, modifyList( args.in, list(frequencies=frequencies, ftype="pass") ))
-      data = filter.apply(data, b)
-    }
-  }
-  #fold the data for cross-validated CSP filters
-  args.in = .eval_ellipsis("data.folds.split", ...)
-  foldedData = do.call(data.folds.split, modifyList( args.in, list(data=data) ))
-  #method to use:
-  methodStr = ifelse( grepl("spec", tolower(method)), "SpecCSP.apply", "CSP.apply" )
-  args.csp = .eval_ellipsis(methodStr, ...)
-  args.feat = .eval_ellipsis("CSP.get_features", ...)
-  #insert get_features arguments for CSP function
-  args.csp[["..."]] = NULL; args.csp = modifyList(args.csp, args.feat[3:4])
-  #loop over fold data to create CSP features:
-  CSPfolds = lapply(foldedData, function(fold) {
-    .CSP.create_sets(fold$train, fold$test, args.csp, args.feat, method=methodStr)
-  })
-  #continue fitting ML model to CSP features:
-  args.in = list(...)
-  if ( eval( args.feat$logtransform ) & eval( args.feat$approximate ) ) {
-    args.in = modifyList(args.in, list(scale=F)) #scaling done via logtransformation
-  }
-  CSPfits = lapply(CSPfolds, function(fold) {
-    do.call(data.fit_model, modifyList( args.in, list(trainData=fold$train, 
-                                                      testData=fold$test) ))
-  })
-  return( list(summary=sapply(CSPfits, "[[", "AUC"), 
-               ML = CSPfits, CSP = lapply(CSPfolds, "[[", "CSP") ))
-}
-
-.CSP.create_sets <- function(train, test, args.csp, args.feat, method="CSP.apply") {
-  ## helper to prepare train and test set with CSP procedure
-  #args.csp: arguments to CSP function
-  #args.feat: arguments to CSP.get_features function
-  #NOTE: arguments are called outside to not redundantly execute these calls 
-  #method: CSP.apply or SpecCSP.apply
-  #RETURNS ---
-  #trainData, testData, CSP output
-  train = data.check(train, aslist=F)
-  test = data.check(test, aslist=F)
-  if ( eval(args.feat$approximate) ) { #1 value per trial
-    train.nsamples = data.get_samplenum(train) 
-    test.nsamples = data.get_samplenum(test)
-    train.outcome = train[ seq(1, nrow(train), train.nsamples), 2]
-    test.outcome = test[ seq(1, nrow(test), test.nsamples), 2]
-    train.n = 1:length(train.outcome)
-    test.n = 1:length(test.outcome)
-  } else { #dimensionality is the same as before
-    train.n = train[,1]; test.n = test[,1] 
-    train.outcome = train[,2]; test.outcome = test[,2]
-  }
-  csp = do.call(method, modifyList( args.csp, list(data=train) ))
-  trainData = data.frame(train.n, train.outcome, csp$features)
-  testData = data.frame(test.n, test.outcome,
-      do.call(CSP.get_features, modifyList( args.feat, list(data=test, filters=csp$filters) )))
-  return( list(train=trainData, test=testData, CSP=csp))
-}
-
-#CSP paradigm
-CSP.apply <- function(data, npattern=3, baseline=NULL, features=T, ...) {
-  ## main function of the CSP paradigm: applies the spatial filters for feature extraction
-  ## features are maximally informative with respect to the contrasted condition
-  #INPUT ---
-  #data: df or list of trials expected with sample num in 1st col, binary outcome in 2nd col 
-  #npattern: patterns to extract * 2 (for each condition), 
-  # -> if too low the features may not contain sufficient information for the classifiers
-  # -> if too high, risk of overfitting
-  #logtransform: should variance features be logtransformed
-  #baseline: define last sample of baseline (if any) so that it will be excluded 
-  #          for the CSP procedure. If Null, no samples are removed.
-  #features: if T, features are computed and returned
-  data = data.check(data, aslist=F)
-  k = unique(data[,2]) #binary outcome expected in 2nd column
-  if (length(k) != 2) { stop( "Either outcome is not binary or not in the 2nd column." ) }
-  #remove baseline for CSP procedure
-  if ( !is.null(baseline) ) {
-    data = data.trials.remove_samples(data, end=baseline)
-  }
-  #get data into trial format
-  nsamples = data.get_samplenum(data)
-  target = data[seq(1, nrow(data), nsamples), 2] #2nd col with DV
-  trialdata = data.trials.split(data, strip=T)
-  
-  #get trial-averaged Cov-matrix per condition -> C1, C2
-  #ToDo: currently just centered. Scale? or (x'*X / trace) (Lu et al.)?
-  norm.cov <- function(X) {
-    return(cov(scale(X, scale=F))) #sample covariance (N-1) on centered data
-  }
-  if (nsamples > 1) {
-    C1 = Reduce("+", lapply(trialdata[target==k[1]], norm.cov)) / length(trialdata[target==k[1]]) #averaged C
-    C2 = Reduce("+", lapply(trialdata[target==k[2]], norm.cov)) / length(trialdata[target==k[2]]) #averaged C
-    #ToDo: add regularization (Lu et al. 2010)
+  #data: df or list of trials, slices
+  #weights: spatial filters, e.g. output by decompose.CSP
+  #approximate: if True, the variance per trial is computed to approximate band power
+  #             otherwise, the components are returned (same number of rows as data)
+  #logtransform: if True, variance is logtransformed (a form of scaling variance)
+  data = data.set_type(data)
+  if ( "slices" %in% attr(data, "type") ) {
+    data = data.split_trials( data, strip=T )
   } else {
-    C1 = norm.cov( plyr::rbind.fill( trialdata[target==k[1]] ) )
-    C2 = norm.cov( plyr::rbind.fill( trialdata[target==k[2]] ) )
+    data = data.check(data, aslist=T, strip=T)
   }
-  
-  #do the eigenvalue decomposition on C1+C2
-  VD = eigen(C1+C2, symmetric=T); V = VD$vectors; d = VD$values
-  r = sum(d > 10^-6*d[1]) #estimate rank
-  if (r < ncol(V)) { 
-    warning( paste("Matrix does not have full rank, i.e.", ncol(V)-r+1 ,"columns are collinear.",
-                   "Computing only",r,"components.") ) 
-  }
-  if (r < 2*npattern) {
-    warning( paste("Too few data columns to calculate", 2*npattern, "filters.",
-                   "Computing", 2*floor(r/2), "instead." ) )
-    npattern = floor(r/2)
-  }
-  #whiten C1+C2 via matrix P, such that P * (C1+C2) * P' = I
-  P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
-  #diag((P %*%(C1+C2) %*% t(P))) #whitened
-  
-  #whitened spatial covariance matrices (if added together that is):
-  S1 = P %*% C1 %*% t(P) #P * C1 * P' 
-  S2 = P %*% C2 %*% t(P) #P * C2 * P'
-  #eigenvectors of S1 maximize the variance for class 1 and minimize it for class 2
-  R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
-  #spatial filters:
-  W = t(P) %*% R #W' = R' * P
-  A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
-  
-  #this should be equivalent (does not check for rank)
-  #careful with ordering (descending vs. ascending values)
-  #careful w.r. to algorithm used (qz, cholesky - cf. matlab)
-  #   require(geigen)
-  #   eig = geigen(C1, C1+C2) 
-  #   W = eig$vectors[, order(eig$values, decreasing = T)]
-  #   A = solve(W) #patterns are in the rows
-  
-  #obtain the npattern spatial filters: 
-  #left side maximizes variance under 1st condition and minimizes for 2nd, vice versa on the right
-  #filters: eigenvectors from both ends of the eigenvalue spectrum
-  
-  #with last n cols (e.g. 62:64)
-  filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
-  patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
-  
-  if (!features) {
-    return(list(filters=filters, 
-                patterns=patterns))
-  } #else...
-  #extract (log-variance) features according to CSP:
-  #original signal is projected via filters: linear mapping so that the variance of the... 
-  #reduced feature space is maximally informative regarding the contrast
-  #each projection captures a different spatial localization
-  #the filtered signal is uncorrelated in both conditions
-  #the features are extracted per trial
-  args.in = .eval_ellipsis("CSP.get_features", ...)
-  features = do.call(CSP.get_features, modifyList( args.in, list(data=trialdata, filters=filters) ))
-  return(list(outcome=target,
-              features=features, 
-              filters=filters, 
-              patterns=patterns))
-}
-
-CSP.get_features <- function(data, filters, approximate=T, logtransform=T) {
-  ## project measurements onto spatial CSP filters
-  #INPUT ---
-  #data: df or list of trials
-  #filters: spatial filters, e.g. output by CSP.apply
-  #approximate: if True, the variance per trial is computed to
-  #             approximate band power
-  #             otherwise, the components are returned
-  #logtransform: if True, variance is logtransformed
-  trialdata = data.check(data, aslist=T, strip=T)
-  if (approximate) { 
-    #variance per trial
-    features = t(sapply(trialdata, function(td) apply(as.matrix(td) %*% filters, 2, var)))
+  if ( "filters" %in% names(weights) ) { #input is a list from CSP/SPoC
+    weights = weights$filters
+  } 
+  projection = lapply(data, function(trial) as.matrix(trial) %*% weights)
+  if (approximate) { #variance per trial
+    features = t( sapply(projection, apply, 2, var) ) #column-wise
     if (logtransform) { 
-      features = log(features)
-      if ( any(features == -Inf) ) { #FIX: control for -Inf if var was 0
-        #get columns with -Inf values
-        cols = which( apply(features, 2, function(x) any(x == -Inf)) )
-        for (col in cols) { #replace -Inf values with log of 10^-30
-          features[ which(features[,col] == -Inf), col ] = log(10^-30)
-        }
+      if ( identical(min(features), 0) ) { #prevent -Inf with log(0)
+        #replace 0 with the minimum of 10^-30 or smallest features value after exclusion of 0
+        features[ which(features<=0) ] = min( 10^-30, min( features[ which(features>0) ] ) )
       }
+      features = log(features)
     }
-    return(features)
+  } else { #components
+    features = plyr::rbind.fill.matrix( projection ) #rebind list to matrix
   }
-  #components
-  features = plyr::rbind.fill.matrix( lapply(trialdata, function(td) as.matrix(td) %*% filters) )
   return(features)
 }
 
-CSP.Multiclass.apply <- function(data, ...) {
-  ## Multiclass extension to CSP using OVR (one vs. rest) approach, cf. Dornhege et al. 2004
-  ## input is the same as for CSP but data contains more than 2 unique classes
-  ## the resulting filters/patterns are the result of a per-class comparison against the others
-  ## whose filters/patterns (each 2*npattern) were column-bound and ordered for the classes
-  args.csp = .eval_ellipsis("CSP.apply", ...)
-  args.csp[["..."]] = NULL
-  data = data.check(data, aslist=F)
-  k = unique(data[,2]) #multiclass outcome expected in 2nd column
-  if (length(k) <= 2) { stop( "No multi-class outcome found in the 2nd column." ) }
-  #iterate over the classes to obtain OVR filters
-  OVR = lapply(k, function(class) {
-    #collapse all other classes to one level ("rest")
-    d = data.collapse_levels(data, labels = k[!k %in% class], verbose=F)
-    do.call(CSP.apply, modifyList( args.csp, list(data=d, features=F) ))
-  })
-  #column bind the per class OVR filters and patterns 
-  #order k because otherwise its order will conform to the first appearance in data
-  filters = do.call(cbind, lapply(OVR[ order(k) ], "[[", "filters"))
-  patterns = do.call(cbind, lapply(OVR[ order(k) ], "[[", "patterns"))
-  #get features and outcome
-  if ( !eval(args.csp$features) ) {
-    return(list(filters=filters, 
-                patterns=patterns))
-  }
-  args.feat = .eval_ellipsis("CSP.get_features", ...)
-  features = do.call(CSP.get_features, modifyList( args.feat, list(data=data, filters=filters) ))
-  nsamples = data.get_samplenum(data)
-  target = data[seq(1, nrow(data), nsamples), 2]
-  return(list(outcome=target,
-              features=features, 
-              filters=filters, 
-              patterns=patterns))
-}
-
-# CSP.get_sliced_features <- function(data) {
-#   ## gets the log variance of sliced CSP components
-#   #INPUT ---
-#   #data: a slice list with CSP components
-#   #RETURNS ---
-#   #a slice list with 1 row per trial (the logvariance per component)
-#   .loadFuncs(ML = T)
-#   sliced_logvar = lapply(1:length(data), function(i) {
-#     dt = data.trials.split(data[[i]], strip=T)
-#     x = t( sapply(dt, function(trial) {
-#       log( apply(trial, 2, var) )
-#     }) )
-#     outcome = data.permute_labels(data[[i]], shuffle=F)$outcome
-#     out = data.frame(sample=i, outcome, x)
-#   })
-#   return(sliced_logvar)
-# } 
-
-.CSP.write_patterns <- function(patternlist) {
-  ## function to write CSP pattern data into a matlab friendly format
+decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NULL, ...) {
+  ## Common spatial pattern algorithm, cf. Lemm et al. 2005, Blankertz et al. 2008
+  ## CSP paradigm: create spatial filters (weights) which can be used
+  ## to extract signals of interest (via projection) from the data measurements
+  ## resulting features are maximally informative with respect to the contrasted binary classes
   #INPUT ---
-  #patternlist: output from CSP.apply
-  dir.create(path="./patterns", showWarnings = F)
-  lapply(1:length(patternlist), function(i) {
-    write.table(patternlist[[i]], 
-                file=paste0("./patterns/pattern",i,".txt"), 
-                sep=",", row.names=F, col.names=F)
-  })
-  return("Done.")
+  #data: df or list of trials, slices, subjects 
+  #npattern: patterns to extract * 2 (for each condition), 
+  # -> if too low the features may not contain sufficient information for the classifiers
+  # -> if too high, risk of overfitting
+  #baseline: define last sample of baseline (if any) so that it will be excluded 
+  #          for the CSP procedure. If Null, no samples are removed.
+  #features: if T, features are computed and returned
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
+  #RETURNS ---
+  #list with 3 or 5 elements (if features = T)
+  #filters, patterns, lambda, (features, outcome)
+  #filters are the weights to be used for projection, patterns are the 
+  #corresponding spatial activation pattern (inverse of the filters)
+  #lambda are the eigenvalues (effect sizes) corresponding to the filters
+  #NOTE: if outcome is not binary, one vs. the rest approach is taken
+  data = data.set_type(data)
+  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    args.in = as.list( match.call() )[-1]
+    CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      do.call(decompose.CSP, utils::modifyList( args.in, list(data=d) ))
+    .parallel_check(output=pcheck)
+    CSPresult = setNames( CSPresult, paste0("subject", seq_along(data)) )
+    attr(CSPresult, "type") = "subjects"
+    return(CSPresult)
+  }
+  data = data.check(data, aslist=F)
+  #remove baseline for CSP procedure
+  if ( !is.null(baseline) ) data = data.remove_samples(data, end=baseline)
+  k = unique(data[,2]) #check outcome
+  if (length(k) > 2) { #one vs. the rest (OVR)
+    cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
+    #sort k because otherwise its order will conform to the first appearance in data
+    OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
+      d = data.merge_classes(data, labels = k[!k %in% class], verbose=F)
+      decompose.CSP(data=d, npattern=npattern, features=F) #... only required for features
+    })
+    #column bind the per class OVR results
+    filters = do.call(cbind, lapply(OVR, "[[", "filters"))
+    patterns = do.call(cbind, lapply(OVR, "[[", "patterns"))
+    lambda = do.call(c, lapply(OVR, "[[", "lambda"))
+  }
+  #get data into trial format
+  nsamples = data.samplenum(data)
+  target = data[seq(1, nrow(data), nsamples), 2] #2nd col with DV
+  data = data.split_trials(data, strip=T)
+  if ( length(k) == 2 ) { #binary
+    #get trial-averaged Cov-matrix per condition -> C1, C2
+    #ToDo: currently just centered. (x'*X / trace) (Lu et al.)?
+    norm.cov <- function(X) cov(scale(X, scale=F)) #sample covariance (N-1) on centered data
+    if (nsamples > 1) { #compute within trials
+      C1 = Reduce("+", lapply(data[target==k[1]], norm.cov)) / length(data[target==k[1]]) #averaged C
+      C2 = Reduce("+", lapply(data[target==k[2]], norm.cov)) / length(data[target==k[2]]) #averaged C
+      #ToDo: add regularization
+    } else { #compute across trials
+      C1 = norm.cov( plyr::rbind.fill( data[target==k[1]] ) )
+      C2 = norm.cov( plyr::rbind.fill( data[target==k[2]] ) )
+    }
+    #do the eigenvalue decomposeosition on C1+C2
+    VD = eigen(C1+C2, symmetric=T); V = VD$vectors; d = VD$values
+    r = sum(d > 10^-6*d[1]) #estimate rank
+    if (r < ncol(V)) { 
+      cat( "Data does not have full rank, i.e.", ncol(V)-r+1 ,
+           "columns are collinear. Computing only",r,"components." )
+    }
+    if (r < 2*npattern) {
+      warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
+               "Computing ", 2*floor(r/2), " instead." )
+      npattern = floor(r/2)
+    }
+    #whiten C1+C2 via matrix P, such that P * (C1+C2) * P' = I
+    P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
+    #diag((P %*%(C1+C2) %*% t(P))) #whitened
+    #whitened spatial covariance matrices (if added together that is):
+    S1 = P %*% C1 %*% t(P) #P * C1 * P' 
+    S2 = P %*% C2 %*% t(P) #P * C2 * P'
+    #eigenvectors of S1 maximize the variance for class 1 and minimize it for class 2
+    R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
+    #spatial filters:
+    W = t(P) %*% R #W' = R' * P
+    A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
+    #obtain the npattern spatial filters: 
+    #left side maximizes variance under 1st condition and minimizes for 2nd, vice versa on the right
+    filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
+    patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
+    lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
+  }
+  output = list(filters=filters, patterns=patterns, lambda=lambda)
+  attr(output, "type") = "CSP"
+  if (!features) return(output) #else...
+  #create CSP features:
+  args.in = .eval_ellipsis("data.project", ...)
+  output$features = do.call(data.project, modifyList( args.in, list(data=data, weights=filters) ))
+  output$outcome = target #add for convenience (directly corresponds to the features)
+  return(output)
 }
 
-SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=NULL, 
-                          steps=3, srate=500, ...) {
+decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=NULL, ...) {
+  ## Source Power Correlation Analysis, cf. Dähne et al. 2014
+  ## supervised learning approach that takes the DV into account
+  ## analogous to CSP but with continuous outcome
+  ## general idea: find a spatial filter that extracts an oscillatory signal whose
+  ## power correlates with a given (continuous) target variable
+  #INPUT ---
+  #data: df or list of trials, slices, subjects
+  #npattern: the first/last n SPoC filters to use for feature generation
+  #baseline: define last sample of baseline (if any) so that it will be excluded 
+  #          for the SPoC procedure. If Null, no samples are removed.  
+  #features: if T, features are computed and returned
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
+  #NOTE: outcome should be numeric, otherwise it will be converted to numbers
+  #RETURNS ---
+  #filters: spatial filters, demixing matrix W
+  #patterns: activation patterns, mixing matrix A
+  #lambda: eigenvalues (lambda) of SPoC components, the power correlations
+  #features: trial-wise (log)variance of SPoC-components
+  #outcome: as supplied (in numeric form), format as 1 value per trial
+  data = data.set_type(data)
+  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    SPoCresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      do.call(decompose.SPoC, utils::modifyList( list(data=d, npattern=npattern, 
+                            baseline=baseline, features=features), list(...) ))
+    .parallel_check(output=pcheck)
+    SPoCresult = setNames( SPoCresult, paste0("subject", seq_along(data)) )
+    attr(SPoCresult, "type") = "subjects"
+    return(SPoCresult)
+  }
+  data = data.check(data, aslist=F)
+  if ( !is.null(baseline) ) { #remove baseline for SPoC procedure
+    data = data.remove_samples(data, end=baseline)
+  }
+  nsamples = data.samplenum(data)
+  outcome = data[seq( 1, nrow(data), by=nsamples ), 2]
+  if ( !is.numeric(outcome) ) {
+    warning( "Converting outcome to be numeric." )
+    outcome = as.numeric( as.factor(outcome) )
+  }
+  #scale to zero mean and unit variance (sensible for continuous variables)
+  z = scale(outcome) #z same length as trials
+  data = data.split_trials(data[,-2], strip=T) #transform to list
+  #z is approximated in each trial by the variance of X
+  #which is equal to W' * C(t) * W
+  #to have C(t) mean-free: C(t) - C [the average covariance across all trials]
+  C = Reduce("+", lapply(data, cov)) / length(data) #averaged C
+  C_trials = lapply(data, function(tr) cov(tr) - C) #mean-free trial-wise C
+  #obtain a z-weighted covariance matrix:
+  #Cz expresses the covariance between z and its approximation
+  Ct_vec = sapply(C_trials, matrix, nrow=nrow(C)*ncol(C)) #vectorize the trial-wise cov
+  Cz = matrix(Ct_vec %*% z, nrow(C), ncol(C)) / length(data)
+  #eigenvalues directly express that covariance
+  #Cz needs to be whitened to make the generalized eigenvalue problem into an ordinary one
+  VD = eigen(C); V = VD$vectors; d = VD$values
+  r = sum(d > 10^-6*d[1]) #rank
+  if (r < ncol(C)) {
+    cat( "Data does not have full rank, i.e.", ncol(C)-r+1 ,
+         "columns are collinear. Computing only",r,"components." )
+  }
+  if (r < 2*npattern) {
+    warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
+             "Computing ", 2*floor(r/2), " instead." )
+    npattern = floor(r/2)
+  }
+  M = V[,1:r]  %*% diag(d[1:r]^-0.5) #might not be full-rank
+  Cz_white = t(M) %*% Cz %*% M
+  #now the ordinary eigenvalue decomposeosition:
+  WD = eigen(Cz_white); W = WD$vectors; d = WD$values
+  W = M %*% W #project back to original (un-whitened) channel space
+  #scale eigenvectors to unit variance since eigenvector scaling is arbitrary and not unique:
+  W = apply(W, 2, function(w) { w/sqrt(t(w) %*% C %*% w) }) #does nothing if already unit variance
+  A = C %*% W  %*% solve((t(W) %*% C %*% W), tol=10^-30) #pattern matrix
+  
+  filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
+  patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
+  lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
+  output = list(filters=filters, patterns=patterns, lambda=lambda)
+  attr(output, "type") = "SPoC"
+  if (!features) return(output) #else...
+  #compute SPoC features/components
+  args.in = .eval_ellipsis("data.project", ...)
+  output$features = do.call(data.project, modifyList( args.in, list(data=data, weights=filters) ))
+  output$outcome = outcome #add for convenience (directly corresponds to the features)
+  return(output)
+}
+
+decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, iterations=3,
+                          baseline=NULL, features=T, nCores=NULL, ...) {
   ##Spectrally weighted CSP, cf. Tomioka et al. 2006
   ##if frequency band is unknown, this algorithm tries to do simultaneous
   ##spatio-temporal filter optimization, i.e iterative updating of bandpass-filter and weights
   ##generally outperforms broad-band CSP
   #INPUT ---
-  #data: df or trial list with 1st col = samples, 2nd col = outcome
+  #data: df or list of trials, slices, subjects
+  #srate: sampling rate of the data
   #npattern: number of CSP weights per class (W ncol = 2*npattern)
   #p: regularization parameter, seq(-1,1,by=0.5) = scaling exponent (see below)
   #q: regularization parameter, seq(0,4,by=0.5) = discriminability (see below)
   #prior: frequency band to search in, defaults to the full spectrum
-  #steps: number of iterations
-  #srate: sampling rate of the data
+  #iterations: number of iterations
+  #baseline: define last sample of baseline (if any) so that it will be excluded 
+  #          for the CSP procedure. If Null, no samples are removed.
+  #features: if T, features are computed and returned
+  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        can also be an already registered cluster object
   ## see Tomioka paper page 16, figure 6 for some light on the parameters q and p
   #(p,q) = (0,0) = standard wide-band filtered CSP (alpha is set to 1 on each iteration)
   #(p,q) = (-1,1) = theoretical filter optimum
@@ -338,191 +264,246 @@ SpecCSP.apply <- function(data, npattern=3, p=0, q=1, prior=NULL,
   #however if prior information itself is not useful (broadband filter without specific assumption)
   #the theoretical filter optimum with p=-1 is better (sets beta to 1 each iteration), 
   #or more generally: p < 0 if little prior knowledge is at hand (note: p also depends on q!)
+  #RETURNS ---
+  #list with 4 or 6 elements (if features = T)
+  #filters, patterns, lambda, alpha, (features, outcome)
+  #filters are the weights to be used for projection, patterns are the 
+  #corresponding spatial activation pattern (inverse of the filters)
+  #lambda are the eigenvalues (effect sizes) corresponding to the filters
+  #alpha are the spectral filters that were jointly optimized with W
+  #alpha has attributes: "bands" indicates which part of the spectrum was searched
+  #                      "frequencies" indicates the frequencies corresponding to bands
+  #NOTE: if outcome is not binary, one vs. the rest approach is taken
+  data = data.set_type(data)
+  args.in = as.list( match.call() )[-1]
+  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
+    pcheck = .parallel_check(required=length(data), nCores=nCores)
+    CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+      do.call(decompose.SpecCSP, utils::modifyList( args.in, list(data=d) ))
+    .parallel_check(output=pcheck)
+    CSPresult = setNames( CSPresult, paste0("subject", seq_along(data)) )
+    attr(CSPresult, "type") = "subjects"
+    return(CSPresult)
+  }
   data = data.check(data, aslist=F)
-  if ( is.null(prior) ) prior = c(0, srate/2)
+  if ( !is.null(baseline) ) { #remove baseline for CSP procedure
+    data = data.remove_samples(data, end=baseline)
+  }
+  if ( is.null(prior) ) prior = c(0, srate/2) #full spectrum
   p = p + q
-  k = unique(data[,2]) #binary outcome expected in 2nd column
-  if (length(k) != 2) stop( "Either outcome is not binary or not in the 2nd column." )
-  nsamples = data.get_samplenum(data) #samples per trial
+  k = unique(data[,2])
+  if (length(k) > 2) { #one vs. the rest (OVR)
+    cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
+    #sort k because otherwise its order will conform to the first appearance in data
+    OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
+      d = data.merge_classes(data, labels = k[!k %in% class], verbose=F)
+      do.call(decompose.SpecCSP, utils::modifyList( args.in, list(data=d, features=F, baseline=NULL) ))
+    })
+    #column bind the per class OVR results
+    filters = do.call(cbind, lapply(OVR, "[[", "filters"))
+    patterns = do.call(cbind, lapply(OVR, "[[", "patterns"))
+    lambda = do.call(c, lapply(OVR, "[[", "lambda"))
+    alpha = do.call(cbind, lapply(OVR, "[[", "alpha"))
+  }
+  nsamples = data.samplenum(data) #samples per trial
   if ( nsamples <= 1 ) stop( "Cannot compute a frequency with less than 2 samples." )
   target = data[seq(1, nrow(data), nsamples), 2] #outcome
-  trialdata = data.trials.split(data, strip=T) #trial format
-  cdata = list(trialdata[target==k[1]],
-               trialdata[target==k[2]]) #split trialdata for class
+  data = data.split_trials(data, strip=T) #trial format
+  class.data = list(data[ target==k[1] ], data[ target==k[2] ]) #split data for class
   freqs = (0:(nsamples-1) * (srate/nsamples)) #frequency table
   bands = which(freqs >= prior[1] & freqs <= prior[2]) #idx of frequencies to search
   
-  #note: equations in Tomioka et al. 2006 refer to single trial data
-  # procedure:
-  # Phi(X,w,B) = log w'*X*B*B'*X'*w (Eq. 1)
-  # obtain feature vector Phi = log-power
-  # train LDA classifier
-  # repeat
-  
   #### begin optimization of coefficients W (spatial filters) and B (temporal filter) ###
-  #Sigma = alpha * V = alpha * x*x' = X*U*U'*B*B'*U*U'*X' #summed for all frequency components k
-  #compute the FFT of the class data and each trial separately to obtain the cross-spectrum
-  specF = lapply(cdata, function(cd) { #for each class...
-    
-    #Xfft contains U (FFT) for all trials:
-    Xfft = lapply(cd, function(td) { #for each trial...
-      apply(td, 2, fft)  #for each channel compute FFT: U
-    })
-    
-    #compute full spectrum F of covariance matrices x*x' for each DFT bin k and trial...
-    lapply(bands, function(k) { #for each idx in bands (the kth frequency component)...
-      lapply(1:length(Xfft), function(tr) { #for each trial...
-        #take the spectrum x of all channels at frequency k and compute cross-spectrum x*x':
-        2*Re( as.matrix(Xfft[[tr]][k,])%*% Conj(Xfft[[tr]][k,]) ) #U = Xfft[[tr]]
-        #note: conjugate (transpose for complex values) reverses the sign of the imaginary part
+  if (length(k) == 2) {
+    #note: equations in Tomioka et al. 2006 refer to single trial data
+    #Sigma = alpha * V = alpha * x*x' = X*U*U'*B*B'*U*U'*X' #summed for all frequency components k
+    #compute the FFT of the class data and each trial separately to obtain the cross-spectrum
+    specF = lapply(class.data, function(cd) { #for each class...
+      #Xfft contains U (FFT) for all trials:
+      Xfft = lapply(cd, function(trial) { #for each trial...
+        apply(trial, 2, fft)  #for each channel compute FFT: U
       })
-    })
-  })  #list of 2 classes, list of k frequency components, list of n trials, ch x ch cov matrix   
-  
-  #compute weighted cross-spectrum matrix V (average over trials)
-  V = lapply(1:2, function(c) {
-    lapply(specF[[c]], function(sF) { #for every freq component, average:
-      Reduce("+", sF) / length(sF) #averaged covariance
-    }) #list of 2 classes, list of k frequency components, ch x ch cov matrix
-  })
-  
-  #finding spectral filter coefficients alpha (B) for each freq component and spatial filter w
-  #number of filters w initialized at 1, changed to 2*npattern on 2nd iteration
-  alpha = lapply(1, function(j) { rep(1, length(bands)) }) #initialize alpha at 1 
-  #main list corresponding to J=1 with k items
-  
-  for (step in 1:steps) { #repeat x times
-    Filters = lapply(alpha, function(alphaj) { #iterate over J filters
-      
-      #get the sensor covariance matrices for each class with alpha * V (summed over k):
-      Sigma = lapply(1:2, function(c) { #for each class
-        S = lapply(1:length(bands), function(k) { #for each freq component k
-          alphaj[k] * V[[c]][[k]] #alpha * V
+      #compute full spectrum F of covariance matrices x*x' for each DFT bin k and trial...
+      lapply(bands, function(k) { #for each idx in bands (the kth frequency component)...
+        lapply(seq_along(Xfft), function(trial) { #for each trial...
+          #take the spectrum x of all channels at frequency k and compute cross-spectrum x*x':
+          2*Re( as.matrix(Xfft[[trial]][k,])%*% Conj(Xfft[[trial]][k,]) ) #U = Xfft[[trial]]
+          #note: conjugate (transpose for complex values) reverses the sign of the imaginary part
         })
-        S = unname(Reduce("+", S)) #Sigma for class c = sum( alpha(k) * V(k) )
-        #note: if names remain in the matrix it might claim to be non-symmetric
       })
-      
-      #optimizing the spatial filter coefficients w:
-      #find a decomposition that is common to both classes (brain states)...
-      #aka a set of bases that simultaneously diagonalizes both C matrices (Eq. 2)
-#       #problem: doesn't handle rank deficiency
-#       eig = geigen(Sigma[[1]], Sigma[[1]]+Sigma[[2]]) #cholesky (symmetric matrices) solution is unique
-#       lambda = sort(eig$values, decreasing=F, index.return=T) #ascending order
-#       VV = eig$vectors[,lambda$ix] #sorted eigenvectors
-      eig = eigen(Sigma[[1]]+Sigma[[2]], symmetric=T)
-      d = eig$values
-      VV = eig$vectors
-      r = sum(d > 10^-6*d[1]) #estimate rank
-      if (r < ncol(VV)) { 
-        warning( paste("Matrix does not have full rank, i.e.", ncol(VV)-r+1 ,"columns are collinear.",
-                       "Computing only",r,"components.") ) 
-      }
-      if (r < 2*npattern) {
-        stop( paste("Too few components to calculate", 2*npattern, "filters.") )
-      }
-      P = diag(d[1:r]^-0.5) %*% t(VV[,1:r]) #aka M
-      S1 = P %*% Sigma[[1]] %*% t(P)
-      S2 = P %*% Sigma[[2]] %*% t(P)
-      eig = eigen(S1)
-      lambda = sort(eig$values, decreasing=F, index.return=T)
-      R = eig$vectors[,lambda$ix] #ascending order
-      W = t(P) %*% R
-      A = Sigma[[1]] %*% W  %*% solve((t(W) %*% Sigma[[1]] %*% W), tol=10^-30) #patterns
-      
-      #top eigenvalue per class:
-      lambda = data.frame(min=lambda$x[1], max=lambda$x[r]) #min, max
-      #retain npattern eigenvectors & -values for each class
-      W = list(W[,1:npattern], W[,(ncol(W)-npattern+1):ncol(W)]) #filters W
-      P = list(A[,1:npattern], A[,(ncol(A)-npattern+1):ncol(A)]) #patterns P
-      list(lambda=lambda, W=W, P=P)
-    }) 
-    
-    lambda = plyr::rbind.fill(lapply(Filters, "[[", 1)) #get lambda
-    #get W and P such that lambda is minimal/maximal over j
-    minJ = which.min(lambda[,1])
-    maxJ = which.max(lambda[,2])
-    W = cbind(Filters[[minJ]]$W[[1]], #min
-              Filters[[maxJ]]$W[[2]]) #max
-    P = cbind(Filters[[minJ]]$P[[1]], #min
-              Filters[[maxJ]]$P[[2]]) #max 
-    
-    #optimization of alpha within each class:
-    #calculate across trials mean and var of w-projected cross-spectrum component (s)
-    #s(w,alpha) = alpha(k)* w'*V(k)*w see below Eq. 3
-    #because we also need the variance in Eq. 3 and not only the mean (which is in V), we...
-    #go back to specF which lets us compute the variance over the trials
-    alpha = lapply(1:ncol(W), function(j) { #for every spatial filter w(j)...
-      coeffs = lapply(1:2, function(c) { #for every class c...
-        lapply(1:length(bands), function(k) { #for every frequency band k...
-          s = sapply(1:length(cdata[[c]]), function(tr) { #for every trial...
-            t(W[,j]) %*% specF[[c]][[k]][[tr]] %*% W[,j] # w'*F(k,t)*w
-            #this signal s(w,alpha) is spatio-temporally filtered
+    })  #list of 2 classes, list of k frequency components, list of n trials, ch x ch cov matrix   
+    #compute weighted cross-spectrum matrix V (average over trials)
+    V = lapply(1:2, function(class) {
+      lapply(specF[[class]], function(sF) { #for every freq component, average:
+        Reduce("+", sF) / length(sF) #averaged covariance
+      }) #list of 2 classes, list of k frequency components, ch x ch cov matrix
+    })
+    #find spectral filter coefficients alpha (B) for each freq component and spatial filter w
+    #number of filters w initialized at 1, changed to 2*npattern on 2nd iteration
+    alpha = list( rep(1, length(bands)) ) #initialize alpha at 1 
+    #main list corresponding to J=1 with k items
+    for (step in 1:iterations) { #repeat x times
+      Filters = lapply(alpha, function(alphaj) { #iterate over J filters
+        #get the sensor covariance matrices for each class with alpha * V (summed over k):
+        Sigma = lapply(1:2, function(class) { #for each class
+          S = lapply(1:length(bands), function(k) { #for each freq component k
+            alphaj[k] * V[[class]][[k]] #alpha * V
           })
-          #compute mean and variance (over all trials) of s
-          list(mu=mean(s), var=var(s)) #for class c and frequency k
+          S = unname(Reduce("+", S)) #Sigma for class = sum( alpha(k) * V(k) )
+          #note: if names remain in the matrix it might claim to be non-symmetric
         })
-      }) #list of: 2 classes, k frequency bins, mu & var
-      
-      #Eq. 4 for class +: alpha(k,+) = s(k,+,w) - s(k,-,w) / var(s(k,+,w)) + var(s(k,-,w)) | or 0 if <
-      alpha_tmp = sapply(1:2, function(c) {
-        sapply(1:length(bands), function(k) {
-          #update alpha according to Eq. 4:
-          alpha_opt = max( 0, ( (coeffs[[c]][[k]]$mu - coeffs[[3-c]][[k]]$mu) / 
-                                  (coeffs[[c]][[k]]$var + coeffs[[3-c]][[k]]$var) ) )
-          
-          #calculate prior filter according to Eq. 6: beta(k) = (s(k,+,w) + s(k,-,w))/2
-          beta_k = (coeffs[[1]][[k]]$mu + coeffs[[2]][[k]]$mu)/2
-          #plug everything into Eq. 6: alpha_opt(k,c)^q * beta(k)^p
-          alpha_opt^q * beta_k^p
+        #optimizing the spatial filter coefficients w:
+        #find a decomposeosition that is common to both classes (brain states)...
+        #aka a set of bases that simultaneously diagonalizes both C matrices (Eq. 2)
+        eig = eigen(Sigma[[1]]+Sigma[[2]], symmetric=T)
+        d = eig$values; VV = eig$vectors
+        r = sum(d > 10^-6*d[1]) #estimate rank
+        if (r < ncol(VV)) {
+          cat( "Data does not have full rank, i.e.", ncol(VV)-r+1,
+               "columns are collinear. Computing only",r,"components." )
+        }
+        if (r < 2*npattern) {
+          warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
+                   "Computing ", 2*floor(r/2), " instead." )
+          npattern = floor(r/2)
+        }
+        P = diag(d[1:r]^-0.5) %*% t(VV[,1:r]) #aka M
+        S1 = P %*% Sigma[[1]] %*% t(P)
+        S2 = P %*% Sigma[[2]] %*% t(P)
+        eig = eigen(S1)
+        lambda = sort(eig$values, decreasing=F, index.return=T)
+        R = eig$vectors[,lambda$ix] #ascending order
+        W = t(P) %*% R
+        A = Sigma[[1]] %*% W  %*% solve((t(W) %*% Sigma[[1]] %*% W), tol=10^-30) #patterns
+        #retain npattern eigenvectors & -values for each class
+        W = list(W[,1:npattern], W[,(ncol(W)-npattern+1):ncol(W)]) #filters W
+        P = list(A[,1:npattern], A[,(ncol(A)-npattern+1):ncol(A)]) #patterns P
+        d = list(lambda$x[1:npattern], lambda$x[(r-npattern+1):r]) #correlation d
+        #top eigenvalue per class:
+        lambda = data.frame(min=lambda$x[1], max=lambda$x[r]) #min, max
+        list(lambda=lambda, W=W, P=P, d=d)
+      }) #end of Filters
+      lambda = plyr::rbind.fill(lapply(Filters, "[[", 1)) #get lambda
+      #get W and P such that lambda is minimal/maximal over j
+      minJ = which.min(lambda$min); maxJ = which.max(lambda$max)
+      W = cbind(Filters[[minJ]]$W[[1]], #min
+                Filters[[maxJ]]$W[[2]]) #max
+      P = cbind(Filters[[minJ]]$P[[1]], #min
+                Filters[[maxJ]]$P[[2]]) #max 
+      #optimization of alpha within each class:
+      #calculate across trials mean and var of w-projected cross-spectrum component (s)
+      #s(w,alpha) = alpha(k)* w'*V(k)*w see below Eq. 3
+      #because we also need the variance in Eq. 3 and not only the mean (which is in V):
+      #go back to specF which lets us compute the variance over the trials
+      alpha = lapply(1:ncol(W), function(j) { #for every spatial filter w(j)...
+        coeffs = lapply(1:2, function(class) { #for every class...
+          lapply(1:length(bands), function(k) { #for every frequency band k...
+            s = sapply(1:length(class.data[[class]]), function(tr) { #for every trial...
+              t(W[,j]) %*% specF[[class]][[k]][[tr]] %*% W[,j] # w'*F(k,t)*w
+              #this signal s(w,alpha) is spatio-temporally filtered
+            })
+            #compute mean and variance (over all trials) of s
+            list(mu=mean(s), var=var(s)) #for class and frequency k
+          })
+        }) #list of: 2 classes, k frequency bins, mu & var
+        #Eq. 4 for class +: alpha(k,+) = s(k,+,w) - s(k,-,w) / var(s(k,+,w)) + var(s(k,-,w)) | or 0 if <
+        alpha_tmp = sapply(1:2, function(class) {
+          sapply(1:length(bands), function(k) {
+            #update alpha according to Eq. 4:
+            alpha_opt = max( 0, ( (coeffs[[class]][[k]]$mu - coeffs[[3-class]][[k]]$mu) / 
+                                    (coeffs[[class]][[k]]$var + coeffs[[3-class]][[k]]$var) ) )
+            #calculate prior filter according to Eq. 6: beta(k) = (s(k,+,w) + s(k,-,w))/2
+            beta_k = (coeffs[[1]][[k]]$mu + coeffs[[2]][[k]]$mu)/2
+            #plug everything into Eq. 6: alpha_opt(k,c)^q * beta(k)^p
+            alpha_opt^q * beta_k^p
+          })
         })
+        #update with the maximum for both classes
+        alphamax = apply(alpha_tmp, 1, max)
+        #normalize alpha coefficients so that they sum to unity (1)
+        alphamax / sum(alphamax)
       })
-      #update with the maximum for both classes
-      alphamax = apply(alpha_tmp, 1, max)
-      #normalize alpha coefficients so that they sum to unity (1)
-      alphamax / sum(alphamax)
-    })
+    } #end of iteration
+    #reverse W and P columns to represent the order of class1, class2:
+    revorder = (2*npattern):1
+    filters = W[, revorder]; patterns = P[, revorder]
+    lambda = c( Filters[[maxJ]]$d[[2]][npattern:1], Filters[[minJ]]$d[[1]][npattern:1] )
+    #assemble alpha for output (order still corresponds to min->max):
+#     alpha = rbind(matrix(0, nrow = min(bands)-1, ncol= 2*npattern), #append 0s for left-out bands 
+#                   unname(t(plyr::ldply(alpha[revorder]))), #insert alpha
+#                   matrix(0, nrow = max(0,nsamples/2-max(bands)+1), ncol = 2*npattern)) #append 0s
+    alpha = unname(t(plyr::ldply(alpha[revorder]))) #no 0s appended
   }
-  #switch around W and P columns to represent the order of class1, class2:
-  W = W[,c( (ncol(W)-npattern+1):ncol(W), 1:npattern )]
-  P = P[,c( (ncol(P)-npattern+1):ncol(P), 1:npattern )]
-  
-  args.in = .eval_ellipsis("CSP.get_features", ...)
-  features = do.call(CSP.get_features, modifyList( args.in, list(data=trialdata, filters=W) ))
-  return(
-    list(alpha=rbind(matrix(0,min(bands)-1,2*npattern), 
-                     unname(t(plyr::ldply(alpha))), 
-                     matrix(0,max(0,nsamples/2-max(bands)+1),2*npattern)),
-         filters=W, patterns=P, freqs=freqs[1:(length(freqs)/2 +1)], 
-         bands=bands, features=features, outcome=target)
-  )
+  row.names(alpha) = bands #indicate searched frequency bands
+  attr(alpha, "frequencies") = freqs[bands] #indicate corresponding frequencies
+  attr(alpha, "npattern") = npattern #indicate number of patterns per class in alpha
+  output = list(filters=filters, patterns=patterns, lambda=lambda, alpha=alpha)
+  attr(output, "type") = "SpecCSP"
+  if (!features) return(output) #else...
+  #compute SpecCSP features/components
+  args.in = .eval_ellipsis("data.project", ...)
+  output$features = do.call(data.project, modifyList( args.in, list(data=data, weights=output$filters) ))
+  output$outcome = target
+  return(output)
 }
 
-
-SpecCSP.plot <- function(specOut, priorlim = T, ylims=c(0,1), title="") {
-  ## plotting the freq response (alpha coefficients) of SpecCSP
+plot.SpecCSP <- function(Spec.result, ylims=c(0,1), title="", 
+                         legendpos="topright", cols=NULL, lwd=2, lty=1) {
+  ## plots the alpha coefficients of the SpecCSP output
+  ## these relfect the signal power per class in the searched frequency spectrum
   #INPUT ---
-  #SpecOut: output from SpecCSP.apply
-  #priorlim: if True, x-Axis gets limited to the predefined freq range
+  #Spec.result: output from decompose.SpecCSP or alpha of that output
+  #             if no outcome info is present in the Spec.result input,
+  #             classes will be simply numbered
   #ylims: y-Axis is the relative power contribution of a freq in the range 0-1
   #title: title of the plot
-  
-  col1 = rgb(0,0.4470,0.7410) #blue
-  col2 = rgb(0.4660,0.6740,0.1880) #green
-  bands = 1:length(specOut$freqs)
-  if (priorlim) { bands = specOut$bands  }
-  if (!is.factor(specOut$outcome)) { 
-    specOut$outcome = as.factor(specOut$outcome)
+  #legendpos: position of the legend
+  #cols: colours per class, defaults up to 5 distinct colours, 
+  #      define manually if more than 5 classes
+  #lwd: line width, 1 value for all classes
+  #lty: either 1 value for all, or vector with 1 value per class
+  if ( "SpecCSP" %in% attr(Spec.result, "type") ) {
+    alpha = Spec.result$alpha #list input
+  } else { #just alpha
+    alpha = Spec.result
   }
-  
-  plot(specOut$freqs[bands], specOut$alpha[bands,1], type="l", las=1,
-       col=col1, lwd=2, ylim=ylims, xlab="Frequency (Hz)", ylab="Power", main=title)
-  lines(specOut$freqs[bands], specOut$alpha[bands,ncol(specOut$alpha)], type="l", 
-        col=col2, lwd=2, lty=1)
-  #2nd class is first in specCSP:
-  legend("topleft", as.character(rev(unique(specOut$outcome))), col=c(col1,col2),
-         lty=c(1,1), lwd=c(2,2), bty="n")
+  if ( "outcome" %in% names(Spec.result) ) {
+    classes = unique( Spec.result$outcome )
+  } else { #no outcome info, simply number the classes
+    classes = 1:(ncol(alpha)/attr(alpha, "npattern"))
+  }
+  if (is.null(cols)) { #manually set colours
+    if ( length(classes) > 5 ) stop("More than 5 distinct outcomes. Please specify colours manually.")
+    cols = c("#0072BD", "#D95319", "#EDB120", "#7E2F8E", "#77AC30")
+  }
+  if ( length(lty) < length(classes) ) lty = rep(lty[1], length(classes))
+  #plot most distinctive patterns per class:
+  if ( length(classes) > 2 ) { #OVR
+    patterns = seq(1, ncol(alpha), by=2*attr(alpha, "npattern")) #first of each OVR
+  } else {
+    patterns = c(1, 2*attr(alpha, "npattern")) #first, last
+  }
+  plot(attr(alpha, "frequencies"), alpha[,1], type="l", las=1, lwd=lwd, lty=lty[1],
+       col=cols[1], ylim=ylims, xlab="Frequency (Hz)", ylab="Power", main=title)
+  for ( class in 2:length(classes) ) {
+    lines(attr(alpha, "frequencies"), alpha[, patterns[class] ], 
+          col=cols[class], lwd=lwd, lty=lty[class])  
+  }
+  legend(legendpos, as.character(classes), col=cols[1:length(classes)],
+         lty=lty, lwd=rep(lwd, length(classes)), bty="n")
 }
 
 
+# .CSP.write_patterns <- function(patternlist) {
+#   ## function to write CSP pattern data into a matlab friendly format
+#   #INPUT ---
+#   #patternlist: output from decompose.CSP
+#   dir.create(path="./patterns", showWarnings = F)
+#   lapply(1:length(patternlist), function(i) {
+#     write.table(patternlist[[i]], 
+#                 file=paste0("./patterns/pattern",i,".txt"), 
+#                 sep=",", row.names=F, col.names=F)
+#   })
+#   return("Done.")
+# }
 
