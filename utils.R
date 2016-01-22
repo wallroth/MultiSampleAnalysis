@@ -32,8 +32,10 @@ data.set_type <- function(data) {
   ## will be fasely identified as slices and should instead be set manually
   ## likewise, a slice list which was created by hand should have constant outcome order
   ## otherwise it will be falsely identified as subjects
-  if ( any( c("trials", "slices", "subjects") %in% attr(data, "type") ) ) {
+  if ( any(c("trials", "slices", "subjects") %in% attr(data, "type")) ) {
     return(data)
+  } else if ( any(c("fold", "folds") %in% attr(data, "type")) ) {
+    stop( "Invalid list type." ) #prevent unwanted behavior
   }
   if ( class(data) == "list" ) {
     if ( class(data[[1]]) == "list" ) { #nested list, perhaps subject data
@@ -60,13 +62,14 @@ data.set_type <- function(data) {
   return(data)
 }
 
-data.set_info <- function(data, trials=NULL, outcome=NULL) {
+data.set_info <- function(data, trials=NULL, outcome=NULL, to.factor=T) {
   ## function to append required info columns (sample numbers and/or outcome) to raw data
   ## which only contains measurements (or at least not the required info cols)
   #INPUT ---
   #data: df or list of trials, slices, subjects
   #trials: int, if specified sample numbers will be added to 1st col accordingly
   #outcome: vector with 1 value per trial, if specified will be added to 2nd col
+  #to.factor: if True, outcome is converted to factor (if not already)
   #NOTES ---
   #if only one of samples or outcome should be added, leave the other at NULL
   #for outcome this requires the presence of sample numbers in the 1st col
@@ -88,20 +91,22 @@ data.set_info <- function(data, trials=NULL, outcome=NULL) {
       if ( length(outcome) != trials ) {
         stop( "Length of the outcome must match number of trials." )
       }
-      outcome = as.factor( rep( outcome, each=nrow(data)/trials ) )
+      outcome = rep( outcome, each=nrow(data)/trials )
       if ( length(outcome) < nrow(data) ) {
         stop( "Number of trials does not match the length of the data." )
       }
+      if (to.factor) outcome = as.factor(outcome)
       data = cbind(outcome, data)
     } else if ( is.datacol(data[,1]) ) { #sample number is not present in df and no trials specified
       stop( "No sample numbers found in 1st column and no trials specified.\n", 
             "Without proper trial info, outcome cannot be appended." )
     } else { #sample number is present in df
       nsamples = data.samplenum(data)
-      outcome = as.factor( rep( outcome, each=nsamples ) )
+      outcome = rep( outcome, each=nsamples )
       if ( length(outcome) < nrow(data) ) {
         stop( "Length of the outcome must match number of trials." )
       }
+      if (to.factor) outcome = as.factor(outcome)
       data = cbind(samples=data[,1], outcome, data[,-1]) #append to 2nd col
     }
   }
@@ -172,6 +177,8 @@ data.check <- function(data, aslist=T, strip=F, transform=T) {
       data = .data.unslice(data)
     } else if ( "subjects" %in% attr(data, "type") ) {
       stop( "Loop the individual data sets of your subject data list for this function." )
+    } else {
+      stop( "Invalid or undefined list type." )
     }
   }
   #df, dt or matrix/vector to df

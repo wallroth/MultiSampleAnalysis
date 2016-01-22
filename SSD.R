@@ -72,6 +72,7 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   #data: continuous df or list of trials, slices, subjects
   #frequencies, transwidth, srate: see SSD.coefficients
   #plot: if True, frequency response of Signal/Noise is plotted (only if not parallelized)
+  #      additional arguments of plot.frequencies may be supplied
   #rank: see SSD.denoise; if not supplied, defaults to q=0.1 for the auto-selection criterion
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
@@ -95,19 +96,20 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   #get signal and noise:
   SSDdata = SSD.filter(data, SSDcoeffs)
   if (plot) { #plot frequency response for Signal and Noise
-    signal = plot.frequencies(SSDdata$signal, args.in$srate, filt=F, plot=F)
-    noise = plot.frequencies(SSDdata$noise, args.in$srate, filt=F, plot=F)
-    plot(names(signal), signal, type="l", las=1, col="#0072BD", lwd=1.5,
+    args.plot = .eval_ellipsis("plot.frequencies", ...)
+    signal = do.call(plot.frequencies, modifyList(args.plot, list(data=SSDdata$signal, plot=F)))
+    noise = do.call(plot.frequencies, modifyList(args.plot, list(data=SSDdata$noise, plot=F)))
+    plot(names(signal), signal, type="l", las=1, col="#0072BD", lwd=args.plot$lwd,
          xlab="Frequency (Hz)", ylab="Spectral Power Density (dB/Hz)", 
          main="SSD: frequency response")
-    lines(names(noise), noise, col="#D95319", lwd=1.5)
+    lines(names(noise), noise, col="#D95319", lwd=args.plot$lwd)
     if ( is.null(args.in$transwidth) ) args.in$transwidth = 1
-    transition = c( args.in$frequencies[1:2] - args.in$transwidth,
-                    args.in$frequencies[1:2] + args.in$transwidth )
+    transition = c( args.in$frequencies[1:2] - args.in$transwidth/2,
+                    args.in$frequencies[1:2] + args.in$transwidth/2 )
     abline(v=args.in$frequencies[1:2], col="black", lty=2) #specified frequency
     abline(v=transition, col="grey", lty=3) #edges of the transition zone
     legend("topright", c("signal","noise"), 
-           col=c("#0072BD","#D95319"), lwd=1.5, bty="n")
+           col=c("#0072BD","#D95319"), lwd=args.plot$lwd, bty="n")
   }
   #do the SSD:
   SSD.out = SSD.apply(SSDdata)
@@ -202,7 +204,7 @@ SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
                                 as.matrix( SSDdata$noise[, measurements] ) - 
                                   as.matrix( SSDdata$signal[, measurements] ) )
   }
-  attr(SSDdata, "type") = "SSD"
+  attr(SSDdata, "type") = "SSD.data"
   return(SSDdata)
 }
 
@@ -236,7 +238,7 @@ SSD.apply <- function(SSDdata, nCores=NULL) {
     attr(SSDresult, "type") = "subjects"
     return(SSDresult)
   }
-  if ( !"SSD" %in% attr(SSDdata, "type") && length(SSDdata) != 2 ) {
+  if ( !"SSD.data" %in% attr(SSDdata, "type") && length(SSDdata) != 2 ) {
     stop( "SSDdata must be alist with 2 elements: signal and noise. ",
           "Refer to the documentation or use SSD.filter." )
   }
@@ -300,7 +302,7 @@ SSD.apply <- function(SSDdata, nCores=NULL) {
   A = Cs %*% W  %*% solve((t(W) %*% Cs %*% W), tol=10^-30) #pattern matrix
   #compile output
   output = list(components=as.data.frame(X.SSD), filters=W, patterns=A, lambda=D, info=Xs[,!datacols])
-  attr(output, "type") = "SSD.result"
+  attr(output, "type") = "SSD"
   return(output)
 }
 
@@ -327,7 +329,7 @@ SSD.denoise <- function(SSD, rank=NULL, nCores=NULL) {
     attr(data, "type") = "subjects"
     return(data)
   }
-  if ( !"SSD.result" %in% attr(SSD, "type") ) stop( "Please supply the output of SSD.apply." )
+  if ( !"SSD" %in% attr(SSD, "type") ) stop( "Please supply the output of SSD.apply." )
   if ( is.null(rank) ) {
     rank = .1 #default q=0.1 for auto-selection
   } else if ( rank > ncol(SSD$components) ) {
