@@ -169,14 +169,15 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
 }
 
 
-plot.frequencies <- function(data, srate, cols=NULL, xlims=NULL, filt=F, plot=T, 
-                             title="", ylab="Spectral Power Density (dB/Hz)") {
+plot.frequencies <- function(data, srate, boundaries=F, cols=NULL, xlims=NULL, plot=T, 
+                             title="", ylab="Spectral Power Density (dB/Hz)", lwd=1.5) {
   ## computes the averaged frequency response for all measurement columns
   ## values are the spectral power density (db/Hz)
   #INPUT ---
   #data: df or list of trials, slices
   #cols: columns (channels) to average over, defaults to all that contain non-integer numeric values
   #srate: sampling rate of the data in Hz
+  #boundaries: should the frequency computation respect boundaries (trials) or not
   #xlims: limit the frequency range to plot, default is the full range (0:srate/2)
   #filt: if True, the averaged freq response is low-pass filtered at 200Hz for visualization
   #plot: if True, the frequency response is plotted. Else, the values are returned
@@ -190,28 +191,35 @@ plot.frequencies <- function(data, srate, cols=NULL, xlims=NULL, filt=F, plot=T,
   if ( is.null(cols) ) { #defaults to all channels if nothing specified
     cols = which(measurements)
   } else {
-    cols = cols[ measurements[cols] ] #analzye only measurements 
+    cols = cols[ measurements[cols] ] #analyze only measurements 
   }
   if ( is.null(xlims) ) xlims = c(0, srate/2)
-  M = nrow(data)/2 + 1
-  temp = sapply(cols, function(c) {
-    X=abs(fft(data[,c])[1:M])^2 / (srate*nrow(data)) #time normalized
-  })
-  xAxis = 0:(M-1) * (srate/nrow(data))
+  if (!boundaries) { #across the whole data
+    M = nrow(data)/2 + 1
+    temp = sapply(cols, function(c) {
+      X=abs(fft(data[,c])[1:M])^2 / (srate*nrow(data)) #time normalized
+    })
+    xAxis = 0:(M-1) * (srate/nrow(data))
+  } else { #trial-wise computation
+    nsamples = data.samplenum(data)
+    M = floor(nsamples/2) + 1
+    data = data.split_trials(data)
+    temp = Reduce("+", lapply(data, function(trial) {
+      sapply(cols, function(c) {
+        X=abs(fft(trial[,c])[1:M])^2 / (srate*nsamples) #time normalized
+      })
+    }) )/length(data)
+    xAxis = 0:(M-1) * (srate/nsamples)
+  }
   temp = 10*log10(temp) #dB conversion
   #note: 20log10(V) is equivalent to 10log10(V^2) [V=Voltage magnitude]
   avgspec = rowMeans(temp) #averaged over all channels
-  if ( filt && nrow(data)>=450 ) { #apply 200Hz lowpass for visualization:
-    b = filter.coefficients(225,50,"low",nrow(data))
-    avgspec = filter.apply(avgspec, b)
-    #note: don't filter if you want to see line noise
-  }
   avgspec = avgspec[xAxis >= xlims[1] & xAxis <= xlims[2]]
   xAxis = xAxis[xAxis >= xlims[1] & xAxis <= xlims[2]]
   if (plot) {
     plot(xAxis[ xAxis >= xlims[1] & xAxis <= xlims[2] ], 
          avgspec[ xAxis >= xlims[1] & xAxis <= xlims[2] ], 
-         type="l", las=1, col="#0072BD", xlim=xlims, lwd=1.5,
+         type="l", las=1, col="#0072BD", xlim=xlims, lwd=lwd,
          xlab="Frequency (Hz)", ylab=ylab, main=title)
   } else { #return the values
     return( setNames(avgspec, xAxis) )
