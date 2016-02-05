@@ -96,7 +96,7 @@ data.set_info <- function(data, trials=NULL, outcome=NULL, to.factor=T) {
         stop( "Number of trials does not match the length of the data." )
       }
       if (to.factor) outcome = as.factor(outcome)
-      data = cbind(outcome, data)
+      data = cbind(outcome, data, stringsAsFactors=F)
     } else if ( is.datacol(data[,1]) ) { #sample number is not present in df and no trials specified
       stop( "No sample numbers found in 1st column and no trials specified.\n", 
             "Without proper trial info, outcome cannot be appended." )
@@ -107,7 +107,7 @@ data.set_info <- function(data, trials=NULL, outcome=NULL, to.factor=T) {
         stop( "Length of the outcome must match number of trials." )
       }
       if (to.factor) outcome = as.factor(outcome)
-      data = cbind(samples=data[,1], outcome, data[,-1]) #append to 2nd col
+      data = cbind(samples=data[,1], outcome, data[,-1], stringsAsFactors=F) #append to 2nd col
     }
   }
   if ( !is.null(trials) ) { #trials specified
@@ -118,7 +118,7 @@ data.set_info <- function(data, trials=NULL, outcome=NULL, to.factor=T) {
     if ( length(samples) < nrow(data) ) {
       stop( "Number of trials does not match the length of the data." )
     }
-    data = cbind(samples, data)
+    data = cbind(samples, data, stringsAsFactors=F)
   }
   return( data.check(data, aslist=T, strip=F, transform=.transformed) )
 }
@@ -218,7 +218,7 @@ data.split_trials <- function(data, strip=F) {
   return( trialdata )
 }
 
-data.split_slices <- function(data, window, overlap=0, split=T) {
+data.split_slices <- function(data, window, overlap=0, idx.out=F) {
   ## group consecutive data points according to the specified window size into separate slices
   ## i.e. data points from different trials but same time intervals are grouped together 
   ## does several control checks to prevent unwanted results
@@ -226,20 +226,18 @@ data.split_slices <- function(data, window, overlap=0, split=T) {
   #data: continuous df or list of trials, subjects
   #window: number of samples per slice
   #overlap: >= 0 number of overlapping samples per slice, i.e. to have a sliding time window
-  #split: if True, data is split. Else, only indices to split with are returned
-  #       "slides" and "splitidx" which can be used like this:
-  #       data[ slides[ splitidx == 1 ], ] #to get the first slice
-  #       or split(data[slides,], splitidx) #get all slices at once
-  #       if overlap is < 1, split(data, splitidx) is sufficient
-  #       if data is a list of trials, slides has the indices, splitidx the intervals, use:
-  #       i.e. data[[1]][ slides[splitidx==1] ,] | lapply(data, function(d) d[ slides[splitidx==1] ,])
+  #idx.out: if False, data is split. Else, only indices to split with are returned
+  #       "trial.idx" and "slice.idx" which can be used on trial data like this:
+  #        trial[ trial.idx[ slice.idx == 1 ], ] #to get trial samples for the first slice
+  #        loop: lapply(data, function(trial) trial[ trial.idx[slice.idx==1] ,])
+  #        or to split the full trial: split( trial[trial.idx,], slice.idx )
   #RETURNS ---
   #a list of which the elements correspond to the number of slices
   #within each list element is a df with the grouped samples across different trials
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.split_slices, window=window, overlap=overlap, split=split )
-    if (split)  attr(data, "type") = "subjects"
+    data = lapply( data, data.split_slices, window=window, overlap=overlap, idx.out=idx.out )
+    if (!idx.out)  attr(data, "type") = "subjects"
     return(data)
   }
   data = data.check(data, aslist=F) #transform to df
@@ -260,12 +258,12 @@ data.split_slices <- function(data, window, overlap=0, split=T) {
     }    
     #slice for a single trial:
     slice = findInterval(1:nsamples, c(seq(1, nsamples, by=window), Inf))
-    if (split) {
+    if (!idx.out) {
       slicedata = split(data, slice) #slice is recycled over the df
       attr(slicedata, "type") = "slices"
       return( slicedata )
     }
-    return( list(slides=1:nrow(data), splitidx=slice) )
+    return( list(trial.idx=1:nsamples, slice.idx=slice) ) #indices per trial
   }
   #sliding window (with overlap):
   startidx = seq(1, nsamples-1, by=window-overlap) #get sequence of start indices for the slices
@@ -285,13 +283,13 @@ data.split_slices <- function(data, window, overlap=0, split=T) {
     cat( "Sliding Window: Your last", imbalance, "slice(s) contain(s)", 
          "less samples than the previous", length(endidx)-imbalance, "slices.\n" )    
   }
-  if (split) {
+  if (!idx.out) {
     temp = data[slides,] #create a new df with updated length due to overlap
     slicedata = split(temp, splitidx)
     attr(slicedata, "type") = "slices"
     return( slicedata )
   }
-  return( list(slides=slides, splitidx=splitidx) )
+  return( list(trial.idx=slides[slides<=nsamples], slice.idx=splitidx) ) #indices per trial
 }
 
 .data.unslice <- function(data) {
@@ -539,6 +537,106 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
 }
 
 
+simulate.data <- function(outcomes=2, n.channels=60, n.trials=50, n.samples=100, SNR=.5,
+                          srate=50, amplitudes=NULL, frequencies=NULL, space=NULL, time=NULL) {
+  ## create simulated data in typical EEG format
+  #INPUT ---
+  #outcomes: number of outcomes, i.e. signals in the data
+  #n.channels: number of measurement columns (e.g. EEG electrodes)
+  #n.trials: number of trials per outcome
+  #n.samples: number of samples per trial
+  #SNR: signal to noise ratio, a value between 0 and 1
+  #srate: sampling rate (n.samples per second)
+  #amplitudes: a vector specifying the signal amplitude for each outcome 
+  #            if NULL, a random number between 1 and 5 per outcome
+  #frequencies: a vector with 2 values per outcome specifying the frequency band
+  #             if NULL, random band per outcome 
+  #space: a vector with 2 values per outcome for the spatial distribution of the signals,
+  #       i.e. the channels in which the signal of the outcome will be present
+  #       if NULL, random channel range is chosen per outcome
+  #time: a vector with 2 values per outcome for the on- and offset of the signals within a trial
+  #RETURNS ---
+  #a data frame with outcome and sample info + specified number of channels
+  #attributes for amplitudes, frequencies, space and time are added
+  .eval_package("signal")
+  if ( SNR < 0 || SNR > 1 ) stop( "The signal-to-noise ratio (SNR) takes a value between 0 and 1." )
+  if ( any( !(c(2*length(amplitudes), length(frequencies), length(space), length(time))/outcomes) %in% c(0,2) ) ) {
+    stop( "Signal properties need to be specified for each outcome individually." )
+  }
+  #set defaults: every outcome gets some attribute on the dimensions time, space, spectrum
+  if ( is.null(amplitudes) ) { #randomply pick a sd
+    amplitudes = sample(1:5, size=outcomes, replace=T)
+  }
+  if ( is.null(frequencies) ) { #randomly pick a spectrum
+    frequencies = sample(2:round(srate/4), size=outcomes, replace=T)
+    frequencies = matrix( c(frequencies, frequencies + 1), ncol=outcomes, byrow=T )
+  }
+  frequencies = matrix(frequencies, ncol=outcomes) #1 column per outcome
+  if ( is.null(space) ) { #spatial distribution of the signal
+    space = matrix( c( sample(1:round(n.channels/2), size=outcomes, replace=T),
+                       sample(round(n.channels/2+1):n.channels, size=outcomes, replace=T) ), ncol=outcomes, byrow=T )
+  }
+  space = matrix(space, ncol=outcomes) #1 column per outcome
+  if (is.null(time) ) { #define on- and offset of signal
+    time = matrix( c( sample(1:round(n.samples/4), size=outcomes, replace=T),
+                      sample(round(3*n.samples/4+1):n.samples, size=outcomes, replace=T) ), ncol=outcomes, byrow=T )
+  }
+  time = matrix(time, ncol=outcomes) #1 column per outcome
+  
+  #create signals from gaussian noise by applying a bandpass butter filter
+  signals = sapply( seq_len(outcomes), function(s) {
+    bt = signal::butter(n=5,W=c(frequencies[1,s]/srate*2, frequencies[2,s]/srate*2), type="pass")
+    tmp = rnorm(n=n.samples, sd=amplitudes[s])
+    x = signal::filtfilt(bt, tmp[ time[1,s]:time[2,s] ])
+    c( rep(0, time[1,s]-1), x, rep(0, n.samples-time[2,s]) ) #append 0 before/after
+  })
+  #create smooth random source patterns
+  patterns = matrix(rnorm(n.channels*outcomes), nrow=n.channels)
+  patterns = apply( patterns, 2, signal::filtfilt, filt=signal::Ma(b=c(1,1)) )
+  #create prototype trials for each outcome
+  trials = lapply( seq_len(outcomes), function(s) {
+    X = signals[, s] %*% t(patterns[ space[1,s]:space[2,s], s])
+    #append 0 columns to align dimensions between mixed signals
+    cbind( matrix(0, nrow=n.samples, ncol=space[1,s]-1), X, 
+           matrix(0, nrow=n.samples, ncol=n.channels-space[2,s]) )
+  })
+  #create all trials
+  data = lapply(trials, function(trial) {
+    #repeat the prototypical trial n times
+    d = matrix( rep( t(trial), n.trials), ncol=n.channels, byrow=T )
+    #create sensor noise
+    noise = matrix(rnorm(n.trials*n.samples*n.channels), nrow=n.trials*n.samples, ncol=n.channels)
+    #add them together
+    SNR * d + (1-SNR) * noise
+  })
+  #add sample num and outcome info
+  data = lapply( seq_len(outcomes), function(s) {
+    data.set_info(data[[s]], trials=n.trials, outcome=rep(LETTERS[s], n.trials), to.factor=F) 
+  })
+  #bind together and shuffle order
+  tmp = do.call( c, data.split_trials(data) )
+  data = data.check( tmp[ sample(1:length(tmp)) ], aslist=F )
+  data$outcome = factor(data$outcome, levels=LETTERS[1:outcomes])
+  #set column names
+  names(data)[3:ncol(data)] = paste0("channel",seq_len(n.channels))
+  #set attributes
+  attr(data, "amplitudes") = amplitudes
+  attr(data, "frequencies") = as.vector(frequencies)
+  attr(data, "space") = as.vector(space)
+  attr(data, "time") = as.vector(time)
+  return(data)
+}
+
+.unnest <- function(L) {
+  ## recursively check list length and remove nesting if length == 1
+  if ( class(L) == "list" ) {
+    L = lapply(L, .unnest) #go further down
+    if ( length(L) <= 1 ) return( L[[1]] ) #remove nesting
+  } else {
+    return(L) #keep non-list element
+  }
+  return(L) #return L with more than 1 element
+}
 
 .eval_ellipsis <- function(funStr, ...) {
   ## helper to evaluate input to ellipsis (...) before handing it to a function
@@ -590,7 +688,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   #          e.g. number of subjects to parallelize over, i.e. length(data)
   #nCores: user input to nCores. If NULL, automatic selection of cores
   #        between maximum required and available cores
-  #        can be a cluster object (makeCluster) to use a registered backend
+  #        can be an empty list to use a registered backend
   #output: previously generated output by this function to shut off backend (if necessary)
   #RETURNS:
   #if output is NULL, an output list with CPUcluster and nCores is generated
@@ -602,7 +700,7 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
       output$CPUcluster = nCores
       output$nCores = getDoParWorkers() 
       output$outside = T #cluster was created outside and will not be shut down
-    } else if ( !is.null(nCores) && nCores <= 1 ) { #no parallelization
+    } else if ( !is.null(nCores) && (length(nCores) == 0 || nCores <= 1 )) { #no parallelization
       registerDoSEQ() #sequential backend for foreach
       output$nCores = 1
     } else {
@@ -629,5 +727,5 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
       .parallel_backend(on=F, output$CPUcluster) #shut down cores
     } #else externally created cluster which is left as is
   }
-  cat( "Done. Time elapsed (mins):", (proc.time()[3]-output$start.time)/60, "\n" )
+  cat( "Done. Time elapsed (mins):", round((proc.time()[3]-output$start.time)/60,2), "\n" )
 }
