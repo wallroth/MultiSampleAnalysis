@@ -76,7 +76,7 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   #rank: see SSD.denoise; if not supplied, defaults to q=0.1 for the auto-selection criterion
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #RETURNS ---
   #the denoised data as a data frame. Attribute "rank" is added to indicate
   #rank after denoising (useful if auto-selection was chosen)
@@ -177,7 +177,7 @@ SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
   #SSDcoeffs: filter coefficients, see SSD.coefficients
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #RETURNS ---
   #list of 2 with dfs containing signal and noise, respectively
   data = data.set_type(data)
@@ -220,7 +220,7 @@ SSD.apply <- function(SSDdata, nCores=NULL) {
   #SSDdata: list of 2 (1: signal, 2: noise)
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object  
+  #        if an empty list, an externally registered cluster will be used  
   #RETURNS ---
   #components: SSD components, obtained by X*W (component space!)
   #filters: spatial filters, demixing matrix W

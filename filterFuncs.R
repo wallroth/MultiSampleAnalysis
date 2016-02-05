@@ -9,7 +9,7 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
   #new.srate: desired sampling rate
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #RETURNS:
   #data with new sampling rate
   require(utils, quietly=T); .eval_package("MASS")
@@ -102,7 +102,7 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
   #              if numeric, converted to class 'Ma' (FIR)
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #Notes ---
   #only filters numeric non-integer data
   #RETURNS ---
@@ -150,13 +150,11 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
         paddedsig = rbind(padstart, trial, padend) #zero padded signal
       }    
       #apply filter:
-      temp = signal::filter(coefficients, paddedsig) #time-series with dims: [ 1, nrow*ncol ]
-      temp = matrix(temp, ncol=ncol(trial)) #retransform into matrix
+      temp = apply(paddedsig, 2, signal::filter, filt=coefficients)
       fsignal = temp[(2*groupdelay+1):nrow(temp),] #remove padded data
     } else if ( class(coefficients) == "Arma" ) { #IIR
       #two-pass filtering forward/backward to avoid phase-delay
-      temp = signal::filtfilt(coefficients, trial)
-      fsignal = matrix(temp, ncol=ncol(trial)) #retransform into matrix
+      fsignal = apply(trial, 2, signal::filtfilt, filt=coefficients)
     } else {
       stop( "coefficients must be of class 'Ma' or 'Arma', cf. signal package." )
     }

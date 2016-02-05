@@ -55,7 +55,7 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
   #features: if T, features are computed and returned
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #RETURNS ---
   #list with 3 or 5 elements (if features = T)
   #filters, patterns, lambda, (features, outcome)
@@ -66,7 +66,9 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    args.in = as.list( match.call() )[-1]
+    args.in = as.list( match.call() )[-c(1,2)]
+    #make sure variable names are evaluated before they are passed on
+    args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
     CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
       do.call(decompose.CSP, utils::modifyList( args.in, list(data=d) ))
     .parallel_check(output=pcheck)
@@ -159,7 +161,7 @@ decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=N
   #features: if T, features are computed and returned
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   #NOTE: outcome should be numeric, otherwise it will be converted to numbers
   #RETURNS ---
   #filters: spatial filters, demixing matrix W
@@ -186,7 +188,11 @@ decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=N
   outcome = data[seq( 1, nrow(data), by=nsamples ), 2]
   if ( !is.numeric(outcome) ) {
     warning( "Converting outcome to be numeric." )
-    outcome = as.numeric( as.factor(outcome) )
+    outcome = suppressWarnings( as.numeric(outcome) ) #suppress warnings in case of NAs
+    if ( any( is.na(outcome) ) ) { #check if NAs were introduced due to non-numeric characters
+      outcome = data[seq( 1, nrow(data), by=nsamples ), 2]
+      outcome = as.numeric( as.factor(outcome) )
+    }
   }
   #scale to zero mean and unit variance (sensible for continuous variables)
   z = scale(outcome) #z same length as trials
@@ -236,7 +242,7 @@ decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=N
 }
 
 decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, iterations=3,
-                          baseline=NULL, features=T, nCores=NULL, ...) {
+                              baseline=NULL, features=T, nCores=NULL, ...) {
   ##Spectrally weighted CSP, cf. Tomioka et al. 2006
   ##if frequency band is unknown, this algorithm tries to do simultaneous
   ##spatio-temporal filter optimization, i.e iterative updating of bandpass-filter and weights
@@ -254,7 +260,7 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   #features: if T, features are computed and returned
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
-  #        can also be an already registered cluster object
+  #        if an empty list, an externally registered cluster will be used
   ## see Tomioka paper page 16, figure 6 for some light on the parameters q and p
   #(p,q) = (0,0) = standard wide-band filtered CSP (alpha is set to 1 on each iteration)
   #(p,q) = (-1,1) = theoretical filter optimum
@@ -275,7 +281,9 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   #                      "frequencies" indicates the frequencies corresponding to bands
   #NOTE: if outcome is not binary, one vs. the rest approach is taken
   data = data.set_type(data)
-  args.in = as.list( match.call() )[-1]
+  args.in = as.list( match.call() )[-c(1,2)]
+  #make sure variable names are evaluated before they are passed on
+  args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
     CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
@@ -312,6 +320,11 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   class.data = list(data[ target==k[1] ], data[ target==k[2] ]) #split data for class
   freqs = (0:(nsamples-1) * (srate/nsamples)) #frequency table
   bands = which(freqs >= prior[1] & freqs <= prior[2]) #idx of frequencies to search
+  if ( length(bands <= 1) ) { #adjust prior
+    prior = c( freqs[ max( which(freqs <= prior[1]) ) ], freqs[ min( which(freqs >= prior[2]) ) ] )
+    bands = which(freqs >= prior[1] & freqs <= prior[2]) #idx of frequencies to search
+    warning( "Adjusted the prior to match the frequency spectrum." )
+  }
   
   #### begin optimization of coefficients W (spatial filters) and B (temporal filter) ###
   if (length(k) == 2) {
@@ -471,7 +484,6 @@ plot.SpecCSP <- function(Spec.result, ylims=c(0,1), title="",
     classes = unique( Spec.result$outcome )
   } else { #no outcome info, simply number the classes
     classes = 1:(ncol(alpha)/attr(alpha, "npattern"))
-    if (length(classes) > 2) classes = classes[ 1:(length(classes)/2) ] #fix
   }
   if (is.null(cols)) { #manually set colours
     if ( length(classes) > 5 ) stop("More than 5 distinct outcomes. Please specify colours manually.")
