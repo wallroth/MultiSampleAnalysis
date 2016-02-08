@@ -483,7 +483,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
 
 
 decode <- function(data, method="within", decompose="none", repetitions=1, 
-                   permutations=1, nCores=NULL, ...) {
+                   permutations=1, verbose=F, nCores=NULL, ...) {
   ## the heart of the decoding package: decode with repeated k-fold CV
   ## in different variations (within/across/between subjects)
   #INPUT ---
@@ -501,6 +501,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   #permutations: number of permutations on each fold, corresponds to the number
   #              of true fits, i.e. a value of 1 means as many permutations as there 
   #              are true fits; 2 means twice as many, etc.; 0 = no permutations
+  #verbose: if True, fits are appended to output. Will take up a lot of memory
+  #         if many slices/repetitions are performed.
   #nCores: number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
@@ -693,31 +695,47 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     fold.fits = setNames( fold.fits, paste0("fold", 1:k) )
     #create summary df
     acc.true = do.call(c, lapply(fold.fits, function(fit) sapply(fit[[1]], "[[", 1)) )
-    summary = data.frame( run=run, fold=1:k, slice=slicenums, label="true", acc=acc.true, row.names=NULL )
+    summary = data.frame( run=run, fold=rep(1:k, each=length(slicenums)), 
+                          slice=slicenums, label="true", acc=acc.true, row.names=NULL )
     if (permutations > 0) {
       acc.random = do.call(c, lapply(fold.fits, function(fit) sapply(fit[[2]], function(rep) sapply(rep, "[[", 1)) ) )
-      summary = rbind(summary, data.frame( run=run, fold=rep(1:k, each=permutations), slice=slicenums, label="random", acc=acc.random, row.names=NULL ))
+      summary = rbind(summary, data.frame( run=run, fold=rep(1:k, each=length(slicenums)*permutations), 
+                                           slice=slicenums, label="random", acc=acc.random, row.names=NULL ))
     }
     #replace placeholder name with actual performance measurement name
-    names(summary)[5] = names(fold.fits$fold1[[1]]$slice1)[1] #1st fold, true fits, 1st slice: 1st name
-    fits = lapply(fold.fits, "[[", 1) #true label fits
-    result[[run]] = list(summary = summary, fits = fits)
+    fnames = names(fold.fits$fold1[[1]]$slice1)[1:2] #1st fold, true fits, 1st slice
+    names(summary)[5] = fnames[1]
+    output = list(summary = summary, fits = lapply(fold.fits, "[[", 1)) #true label fits
+    if (!verbose) { #replace with aggregated predictions
+      output$fits = lapply(slicenums, function(s) { Reduce( "+", lapply(1:k, function(f) {
+        output$fits[[f]][[s]][[ fnames[2] ]] }) )/k }) #average over folds per slice
+    }
+    result[[run]] = output
   } #end of runs
   result = setNames(result, paste0("run", seq_len(repetitions)) )
   ######## FITTING END ########
   ## compile output
-  fits = lapply( result, "[[", "fits" )
-  summary = plyr::rbind.fill( lapply(result, "[[", "summary") )
-  summary = summary[ order(summary$label, summary$slice, summary$run, summary$fold), ]
-  row.names(summary) = NULL
-  if (!slice) summary = summary[,-3] #remove slice column
-  if (repetitions < 2) summary = summary[,-1] #remove run column
-  #significance testing
-  cat("Evaluating result . . .\n")
-  result = do.call(decode.test, modifyList( args.test, 
-              list(result=summary, id="", between=ifelse(slice, "slice", ""), nCores=list()) ))
+  resultdf = plyr::rbind.fill( lapply(result, "[[", "summary") )
+  resultdf = resultdf[ order(resultdf$label, resultdf$slice, resultdf$run, resultdf$fold), ]
+  row.names(resultdf) = NULL
+  if (!slice) resultdf = resultdf[,-3] #remove slice column
+  if (repetitions < 2) resultdf = resultdf[,-1] #remove run column
+  output = list(result = resultdf)
+  if ( permutations > 0 ) { #significance testing
+    cat("Evaluating result . . .\n")
+    summary = do.call(decode.test, modifyList( args.test, 
+                         list(result=resultdf, id="", between=ifelse(slice, "slice", ""), nCores=list()) ))
+    output = c( list(summary=summary), output ) #add summary to first position
+  }
+  fits = lapply(result, "[[", "fits")
+  if (verbose) { #add entire fits to output
+    output$fits = fits
+  } else { #add only aggregation of predictions to output
+    output[[ fnames[2] ]] = setNames( lapply(slicenums, function(s) {
+      Reduce("+", lapply(fits, "[[", s))/repetitions }), paste0("slice",slicenums) )
+  }
   .parallel_check(output=pcheck) #prints final time
-  return(.unnest( list(summary = result, result = summary, fits = fits) )) #return and remove nesting where necessary
+  return( .unnest(output) ) #return and remove nesting where necessary
 }
 
 .output_merge <- function(output, newStr = "subject") {
@@ -897,7 +915,7 @@ data.permute_classes <- function(data, shuffle=T, tol=1) {
     success = F
     while ( !success ) {
       tmp = sample(outcome) #shuffle
-      success = all( sapply( unique(outcome), function(class) { #iterate class labels
+      success = all( sapply( names(classes), function(class) { #iterate class labels
         #range in which permutaiton was successful:
         permute.range = floor(classes[class]/2 - classes[class]/2*tol):ceiling(classes[class]/2 + classes[class]/2*tol)
         sum( which(outcome == class) %in% which(tmp == class) ) %in% permute.range
