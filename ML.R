@@ -35,6 +35,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
   args.in = as.list( match.call() )[-c(1,2)]
   #make sure variable names are evaluated before they are passed on
   args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in$silent = T #suppress messages from decompose methods
   method = tolower(method)
   decompose = toupper(decompose)
   if ( !method %in% c("within","across","between") ) {
@@ -311,6 +312,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
   args.in = args.in[!grepl("train|test|fits", names(args.in))] #remove main input
   #make sure variable names are evaluated before they are passed on
   args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in$silent = T #suppress messages from decompose methods
   if ( method == "regression" && is.null(args.in$model) ) args.in$model = "Reg"
   .eval_package("foreach", load=T)
   if ( identical("subjects", type) ) { #parallelize subjects
@@ -519,6 +521,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   args.in = as.list( match.call() )[-c(1,2)]
   #make sure variable names are evaluated before they are passed on
   args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in$silent = T #suppress messages from decompose methods
   args.test = .eval_ellipsis("decode.test", ...)
   method = tolower(method)
   decompose = toupper(decompose)

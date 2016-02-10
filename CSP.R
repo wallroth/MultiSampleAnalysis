@@ -80,7 +80,7 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
   #remove baseline for CSP procedure
   if ( !is.null(baseline) ) data = data.remove_samples(data, end=baseline)
   k = unique(data[,2]) #check outcome
-  if (length(k) > 2) { #one vs. the rest (OVR)
+  if ( is.null(list(...)$silent) && length(k) > 2 ) { #one vs. the rest (OVR)
     cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
     #sort k because otherwise its order will conform to the first appearance in data
     OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
@@ -111,9 +111,9 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
     #do the eigenvalue decomposeosition on C1+C2
     VD = eigen(C1+C2, symmetric=T); V = VD$vectors; d = VD$values
     r = sum(d > 10^-6*d[1]) #estimate rank
-    if (r < ncol(V)) { 
+    if ( is.null(list(...)$silent) && r < ncol(V)) { 
       cat( "Data does not have full rank, i.e.", ncol(V)-r+1 ,
-           "columns are collinear. Computing only",r,"components." )
+           "columns are collinear. Computing only",r,"components.\n" )
     }
     if (r < 2*npattern) {
       warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
@@ -210,9 +210,9 @@ decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=N
   #Cz needs to be whitened to make the generalized eigenvalue problem into an ordinary one
   VD = eigen(C); V = VD$vectors; d = VD$values
   r = sum(d > 10^-6*d[1]) #rank
-  if (r < ncol(C)) {
+  if ( is.null(list(...)$silent) && r < ncol(C) ) {
     cat( "Data does not have full rank, i.e.", ncol(C)-r+1 ,
-         "columns are collinear. Computing only",r,"components." )
+         "columns are collinear. Computing only",r,"components.\n" )
   }
   if (r < 2*npattern) {
     warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
@@ -300,7 +300,7 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   if ( is.null(prior) ) prior = c(0, srate/2) #full spectrum
   p = p + q
   k = unique(data[,2])
-  if (length(k) > 2) { #one vs. the rest (OVR)
+  if ( is.null(list(...)$silent) && length(k) > 2 ) { #one vs. the rest (OVR)
     cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
     #sort k because otherwise its order will conform to the first appearance in data
     OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
@@ -371,9 +371,9 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
         eig = eigen(Sigma[[1]]+Sigma[[2]], symmetric=T)
         d = eig$values; VV = eig$vectors
         r = sum(d > 10^-6*d[1]) #estimate rank
-        if (r < ncol(VV)) {
+        if ( is.null(list(...)$silent) && r < ncol(VV) ) {
           cat( "Data does not have full rank, i.e.", ncol(VV)-r+1,
-               "columns are collinear. Computing only",r,"components." )
+               "columns are collinear. Computing only",r,"components.\n" )
         }
         if (r < 2*npattern) {
           warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
