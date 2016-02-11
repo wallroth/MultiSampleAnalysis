@@ -1,7 +1,7 @@
 ## FILTER functions
 
 data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
-  ## resample data by trial-wise linear interpolation
+  ## resample data trial- and column-wise using signal's resample
   ## uses zero padding so that artifacts won't be carried into the data
   #INPUT ---
   #data: continuous df or list of trials, slices, subjects
@@ -12,7 +12,7 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
   #        if an empty list, an externally registered cluster will be used
   #RETURNS:
   #data with new sampling rate
-  require(utils, quietly=T); .eval_package("MASS")
+  require(utils, quietly=T); .eval_package(c("MASS","signal"))
   data = data.check(data, aslist=T, strip=F) #transform to list
   if ( "slices" %in% attr(data, "type") ) {
     data = data.split_trials( data, strip=F )
@@ -37,7 +37,7 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
     p = new.srate/old.srate 
     q = 1
   }
-  nPad = ceiling( (max(p,q) * 10)/q ) * q
+  nPad = ceiling( (max(p,q) * 10)/q ) * q #N=10 Matlab default
   n = ceiling( (2*nPad + nsamples)*frac ) #new number of samples
   unPad = nPad * frac
   #obtain datacol info with higher sample number by rebinding temporarily
@@ -51,8 +51,9 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
     padstart = temp[rep(1, nPad), ] #repeat first row n times
     padend = temp[rep(nrow(temp), nPad), ] #repeat last row n times
     temp = rbind(padstart, temp, padend) #zero padded trial data
-    #resample
-    temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
+    #use signal's resample instead of simple linear interpolation (still less refined than Matlab SPT's resample)
+    # temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
+    temp = apply(temp, 2, signal::resample, p=p, q=q)
     setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
     data.frame(samples=1:(n-2*unPad), outcome=data[[i]][1,2], temp[(unPad+1):(nrow(temp)-unPad),])
   })
