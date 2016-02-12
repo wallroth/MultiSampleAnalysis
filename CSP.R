@@ -69,7 +69,7 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
     args.in = as.list( match.call() )[-c(1,2)]
     #make sure variable names are evaluated before they are passed on
     args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
-    CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+    CSPresult = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
       do.call(decompose.CSP, utils::modifyList( args.in, list(data=d) ))
     .parallel_check(output=pcheck)
     CSPresult = setNames( CSPresult, paste0("subject", seq_along(data)) )
@@ -172,7 +172,7 @@ decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=N
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    SPoCresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+    SPoCresult = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
       do.call(decompose.SPoC, utils::modifyList( list(data=d, npattern=npattern, 
                             baseline=baseline, features=features), list(...) ))
     .parallel_check(output=pcheck)
@@ -286,7 +286,7 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    CSPresult = foreach(d=data, .combine=list, .multicombine=T) %dopar%
+    CSPresult = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
       do.call(decompose.SpecCSP, utils::modifyList( args.in, list(data=d) ))
     .parallel_check(output=pcheck)
     CSPresult = setNames( CSPresult, paste0("subject", seq_along(data)) )
