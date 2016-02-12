@@ -19,7 +19,8 @@ data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
     .transformed = T #convert to df at the end
   } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       data.resample(d, old.srate, new.srate)
     .parallel_check(output=pcheck)
     attr(data, "type") = "subjects"
@@ -120,7 +121,8 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
     .transformed = T #convert to df at the end
   } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       filter.apply(d, coefficients)
     .parallel_check(output=pcheck)
     attr(data, "type") = "subjects"

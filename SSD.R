@@ -83,7 +83,8 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       do.call(SSD.pipeline, utils::modifyList( list(data=d, plot=F), list(...) ))
     .parallel_check(output=pcheck)
     data = setNames( data, paste0("subject", seq_along(data)) )
@@ -183,7 +184,8 @@ SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
   data = data.set_type(data)
   if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    SSDdata = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    SSDdata = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       SSD.filter(d, SSDcoeffs)
     .parallel_check(output=pcheck)
     SSDdata = setNames( SSDdata, paste0("subject", seq_along(data)) )
@@ -231,7 +233,8 @@ SSD.apply <- function(SSDdata, nCores=NULL) {
   .eval_package("geigen")
   if ( "subjects" %in% attr(SSDdata, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(SSDdata), nCores=nCores)
-    SSDresult = foreach(d=SSDdata, .combine=list, .multicombine=T, .maxcombine=length(SSDdata)) %dopar%
+    outlen = ifelse(length(SSDdata) > 100, length(SSDdata), 100) #for .maxcombine argument of foreach
+    SSDresult = foreach(d=SSDdata, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       SSD.apply(d)
     .parallel_check(output=pcheck)
     SSDresult = setNames( SSDresult, paste0("subject", seq_along(SSDdata)) )
@@ -323,7 +326,8 @@ SSD.denoise <- function(SSD, rank=NULL, nCores=NULL) {
   #denoised data (original sensor space!)
   if ( "subjects" %in% attr(SSD, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(SSD), nCores=nCores)
-    data = foreach(result=SSD, .combine=list, .multicombine=T, .maxcombine=length(SSD)) %dopar%
+    outlen = ifelse(length(SSD) > 100, length(SSD), 100) #for .maxcombine argument of foreach
+    data = foreach(result=SSD, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       SSD.denoise(result, rank)
     .parallel_check(output=pcheck)
     attr(data, "type") = "subjects"

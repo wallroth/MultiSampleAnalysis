@@ -47,7 +47,8 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
   data = data.set_type(data)
   if ( method == "within" && "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    result = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    result = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       do.call(decode.GAT, utils::modifyList( args.in, list(data=d, nCores=1) ))
     .parallel_check(output=pcheck)
     names(result) = paste0("subject", seq_along(data))
@@ -98,6 +99,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
     measurements = is.datacol(data) #measurement info on all trials
   }
   slicenums = unique(sidx$slice.idx)
+  outlen = ifelse(length(slicenums) > 100, length(slicenums), 100) #for .maxcombine argument of foreach
   measurements[2] = F #ensure there is no mis-identification
   #initialize parallelization for slices (sequential if already parallelized within subjects)
   pcheck = .parallel_check(required=length(slicenums), nCores=nCores)
@@ -130,9 +132,9 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
     preds <- predict(fit$fit, test)[[1]]
     preds = as.ordered(preds)
     if ( length(unique(test.outcome)) > 2 ) { #multiclass
-      auc = pROC::multiclass.roc(test.outcome, preds)$auc[1]
+      auc = pROC::multiclass.roc(test.outcome, preds, direction="<")$auc[1]
     } else { #binary
-      auc = pROC::roc(test.outcome, preds)$auc[1]
+      auc = pROC::roc(test.outcome, preds, direction="<")$auc[1]
     }
     return(auc)
   }
@@ -182,7 +184,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
       
       ## part 1: obtain slice fits
       cat("Fitting . . .")
-      fits.true = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+      fits.true = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
         {
           sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
           slice.train = data.check(lapply( train.true, function(d) na.omit( d[ sliceidx, ] ) ), aslist=F)
@@ -196,7 +198,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
         } else { #don't switch labels between subjects
           train.random = do.call(c, lapply(train, data.permute_classes, shuffle=T, tol))
         }
-        fits.random[[perm]] = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+        fits.random[[perm]] = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
           {
             sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
             slice.train = data.check(lapply( train.random, function(d) na.omit( d[ sliceidx, ] ) ), aslist=F)
@@ -211,7 +213,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
       for (s in slicenums) { #iterate the slices
         sliceidx = sidx$trial.idx[ sidx$slice.idx == s ]
         slice.test = data.check(lapply(test.true, function(d) d[ sliceidx, ] ), aslist=F)
-        result[[s]] = foreach(i=slicenums, .combine=c, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+        result[[s]] = foreach(i=slicenums, .combine=c, .multicombine=T, .maxcombine=outlen) %dopar%
           slice_predict(test=slice.test, fit=fits.true[[i]]) #iterate the fits
       }
       GAT.true = do.call(rbind, result) #columns: fit, rows: generalization
@@ -229,7 +231,7 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
         for (s in slicenums) { #iterate the slices
           sliceidx = sidx$trial.idx[ sidx$slice.idx == s ]
           slice.test = data.check(lapply(test.random, function(d) d[ sliceidx, ] ), aslist=F)
-          tmp[[s]] = foreach(i=slicenums, .combine=c, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+          tmp[[s]] = foreach(i=slicenums, .combine=c, .multicombine=T, .maxcombine=outlen) %dopar%
             slice_predict(test=slice.test, fit=fits.random[[perm]][[i]]) #iterate the fits
         }
         GAT.random[[perm]] = do.call(rbind, tmp)
@@ -318,7 +320,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
   if ( identical("subjects", type) ) { #parallelize subjects
     req = ifelse(doFit, length(train), length(test)) #required CPU cores
     pcheck = .parallel_check(required=req, nCores=nCores)
-    result = foreach(i=seq_len(req), .combine=list, .multicombine=T, .maxcombine=req, .packages=package) %dopar%
+    result = foreach(i=seq_len(req), .combine=list, .multicombine=T, .maxcombine=req+1, .packages=package) %dopar%
       do.call(decode.eval, utils::modifyList( args.in, list( train=train[[i]], test=test[[i]], fits=fits[[i]], nCores=1 ) ))
     .parallel_check(output=pcheck)
     result = .output_merge(result)
@@ -365,6 +367,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
     sidx = list(trial.idx = 1:nsamples, slice.idx = rep(1, nsamples)) #every sample per trial
   }
   slicenums = unique(sidx$slice.idx)
+  outlen = ifelse(length(slicenums) > 100, length(slicenums), 100) #for .maxcombine argument of foreach
   output = list() #prepare function output
   #initialize parallelization for slices (sequential if already parallelized within subjects)
   pcheck = .parallel_check(required=length(slicenums), nCores=nCores)
@@ -392,7 +395,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
     }
     ## start fitting ##
     cat("Fitting . . .")
-    fits = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+    fits = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       {
         sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
         slice.train = data.check(lapply( train, function(d) na.omit( d[ sliceidx, ] ) ), aslist=F)
@@ -445,9 +448,9 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
       if ( method == "classification" ) {
         preds = as.ordered(preds)
         if ( length(unique(out)) > 2 ) { #multiclass
-          auc = pROC::multiclass.roc(out, preds)$auc[1]
+          auc = pROC::multiclass.roc(out, preds, direction="<")$auc[1]
         } else { #binary
-          auc = pROC::roc(out, preds)$auc[1]
+          auc = pROC::roc(out, preds, direction="<")$auc[1]
         }
         res = list( AUC = auc, predictions = caret::confusionMatrix(preds, out,
                                                 dnn=c("Predicted Label", "True Label"))$table )
@@ -459,7 +462,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
     }
     ## start evaluating ##
     cat("Predicting . . .")
-    result = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums), .packages=package) %dopar%
+    result = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen, .packages=package) %dopar%
       { 
         sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
         slice.test = lapply(test, function(d) d[ sliceidx, measurements ] )
@@ -534,7 +537,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   data = data.set_type(data)
   if ( method == "within" && "subjects" %in% attr(data, "type") ) { #parallelize subjects
     pcheck = .parallel_check(required=length(data), nCores=nCores)
-    result = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=length(data)) %dopar%
+    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+    result = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       do.call(decode, utils::modifyList( args.in, list(data=d, nCores=1) ))
     result = .output_merge(result)
     summary = do.call(decode.test, utils::modifyList( args.test, 
@@ -588,6 +592,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     sidx = list(trial.idx = 1:nsamples, slice.idx = rep(1, nsamples)) #every sample per trial
   }
   slicenums = unique(sidx$slice.idx)
+  outlen = ifelse(length(slicenums) > 100, length(slicenums), 100) #for .maxcombine argument of foreach
   #initialize parallelization for slices (sequential if already parallelized within subjects)
   pcheck = .parallel_check(required=length(slicenums), nCores=nCores)
   data = data.split_trials(data, strip=F) #change into trial format
@@ -673,7 +678,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
         test.true = do.call(c, test)
       }
       if ( k <= 1 ) train.true = test.true #no CV
-      fits.true = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+      fits.true = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
         {
           sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
           slice.train = data.check(lapply( train.true, function(d) na.omit( d[ sliceidx, ] ) ), aslist=F)
@@ -691,7 +696,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
           train.random = do.call(c, lapply(train, data.permute_classes, shuffle=T, tol))
           test.random = do.call(c, lapply(test, data.permute_classes, shuffle=T, tol))
         }
-        fits.random[[perm]] = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=length(slicenums)) %dopar%
+        fits.random[[perm]] = foreach(i=slicenums, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
           {
             sliceidx = sidx$trial.idx[ sidx$slice.idx == i ]
             slice.train = data.check(lapply( train.random, function(d) na.omit( d[ sliceidx, ] ) ), aslist=F)
@@ -822,6 +827,7 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
       res.groups = list(result) #list of 1 element for sequential backend
     }
     pcheck = .parallel_check(required=length(res.groups), nCores=nCores)
+    outlen = ifelse(length(res.groups) > 100, length(res.groups), 100) #for .maxcombine argument of foreach
   }
   alpha = sort(alpha, decreasing=T) #in case of multiple values
   if (p.vals) { #get permutation-based p-values
@@ -839,7 +845,7 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
       #one-sided p-value: number of times nulldiff >= truediff / N
       return( mean( nulldiff >= truediff ) )
     }
-    pvals = foreach(res=res.groups, .combine=c, .multicombine=T, .maxcombine=length(res.groups)) %dopar%
+    pvals = foreach(res=res.groups, .combine=c, .multicombine=T, .maxcombine=outlen) %dopar%
       permutefun(res)
   }
   #get CIs
@@ -853,7 +859,7 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
       }), nrow=length(alpha) ) #matrix with row=threshold, col=iteration
       return( rowMeans(CI) ) #mean threshold
     }
-    CIs = foreach(res=res.groups, .combine=rbind, .multicombine=T, .maxcombine=length(res.groups)) %dopar%
+    CIs = foreach(res=res.groups, .combine=rbind, .multicombine=T, .maxcombine=outlen) %dopar%
       bootfun( res[ res[[within.var]] == within.null, ] ) #only null performance
   } else { #obtain CI thresholds directly on null performance
     null = result[ result[[within.var]] == within.null, ] #only null performance
@@ -1115,9 +1121,9 @@ data.fit <- function(train, test=NULL, model="LogReg",
   if ( toupper(model) != "REG" ) {
     preds = as.ordered(preds)
     if ( length(unique(test.outcome)) > 2 ) {
-      auc = pROC::multiclass.roc(test.outcome, preds)$auc[1]
+      auc = pROC::multiclass.roc(test.outcome, preds, direction="<")$auc[1]
     } else {
-      auc = pROC::roc(test.outcome, preds)$auc[1]
+      auc = pROC::roc(test.outcome, preds, direction="<")$auc[1]
     }
     out = list( AUC = auc, predictions = caret::confusionMatrix(preds, test.outcome,
                                     dnn=c("Predicted Label", "True Label"))$table )
