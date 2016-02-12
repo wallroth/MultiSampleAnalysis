@@ -132,9 +132,9 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
     preds <- predict(fit$fit, test)[[1]]
     preds = as.ordered(preds)
     if ( length(unique(test.outcome)) > 2 ) { #multiclass
-      auc = pROC::multiclass.roc(test.outcome, preds, direction="<")$auc[1]
+      auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1]
     } else { #binary
-      auc = pROC::roc(test.outcome, preds, direction="<")$auc[1]
+      auc = pROC::auc(test.outcome, preds, direction="<", algorithm=3)[1]
     }
     return(auc)
   }
@@ -448,9 +448,9 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
       if ( method == "classification" ) {
         preds = as.ordered(preds)
         if ( length(unique(out)) > 2 ) { #multiclass
-          auc = pROC::multiclass.roc(out, preds, direction="<")$auc[1]
+          auc = pROC::multiclass.roc(out, preds, direction="<", algorithm=3)$auc[1]
         } else { #binary
-          auc = pROC::roc(out, preds, direction="<")$auc[1]
+          auc = pROC::auc(out, preds, direction="<", algorithm=3)[1]
         }
         res = list( AUC = auc, predictions = caret::confusionMatrix(preds, out,
                                                 dnn=c("Predicted Label", "True Label"))$table )
@@ -1121,9 +1121,9 @@ data.fit <- function(train, test=NULL, model="LogReg",
   if ( toupper(model) != "REG" ) {
     preds = as.ordered(preds)
     if ( length(unique(test.outcome)) > 2 ) {
-      auc = pROC::multiclass.roc(test.outcome, preds, direction="<")$auc[1]
+      auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1]
     } else {
-      auc = pROC::roc(test.outcome, preds, direction="<")$auc[1]
+      auc = pROC::auc(test.outcome, preds, direction="<", algorithm=3)[1]
     }
     out = list( AUC = auc, predictions = caret::confusionMatrix(preds, test.outcome,
                                     dnn=c("Predicted Label", "True Label"))$table )
