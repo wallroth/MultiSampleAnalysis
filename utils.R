@@ -474,7 +474,7 @@ data.merge_classes <- function(data, labels, new_labels=NULL, col=2, verbose=T) 
   return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
 }  
 
-data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
+data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, plot=F) {
   ## remove trials that are classified as outliers based on variance
   ## the variance is computed within each trial for each channel,
   ## then the channel variances are averaged, yielding one value per trial
@@ -482,15 +482,14 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   ## the threshold is defined as: Q + C * IQR
   #INPUT:
   #data: df or list of trials, slices, subjects
-  #Q, IQR, C: threshold parameters
+  #threshold: variance threshold above which trials are considered as outliers. 
+  #           If NULL, automatic threshold calculation via parameters
+  #Q, IQR, C: threshold parameters for automatic threshold calculation
   #plot: if True, diagnostic plot is printed which plots the trial variance and the
   #      threshold (red dashed line). Removed trials are marked with their trial number
   #RETURNS:
   #data without the outliers,
   #has the attributes: threshold, removed (trials), variance (1 value per trial)
-  if ( any( findInterval( c(Q,IQR), c(0,100) ) != 1 ) ) {
-    stop( "Q and IQR have to be in the range 0 to 100." )
-  }
   data = data.set_type(data)
   if ( "slices" %in% attr(data, "type") ) {
     trialdata = data.split_trials( data, strip=T )
@@ -504,10 +503,14 @@ data.remove_outliers <- function(data, Q=50, IQR=90, C=3, plot=F) {
   }
   # compute global variance values
   trialvar = colMeans( sapply( trialdata, function(trial) apply(trial, 2, var, na.rm=T) ) )
-  # define threshold
-  IQR = c( 0+(100-IQR)/200, 1-(100-IQR)/200 ) #convert IQR values to 0-1 range
-  lims = quantile( trialvar, probs=c(Q/100, IQR), na.rm=T ) #get threshold values
-  threshold = unname( lims[1] + C * (lims[3]-lims[2]) )
+  if ( is.null(threshold) ) { # define threshold
+    if ( any( findInterval( c(Q,IQR), c(0,100) ) != 1 ) ) {
+      stop( "Q and IQR have to be in the range 0 to 100." )
+    }
+    IQR = c( 0+(100-IQR)/200, 1-(100-IQR)/200 ) #convert IQR values to 0-1 range
+    lims = quantile( trialvar, probs=c(Q/100, IQR), na.rm=T ) #get threshold values
+    threshold = unname( lims[1] + C * (lims[3]-lims[2]) )
+  }
   outliers = which( unname(trialvar > threshold) ) #find trials that exceed global variance threshold
   cat( "Removed ", length(outliers), " outliers (",
        round(length(outliers)/length(trialvar)*100, 2), "% of trials).\n", sep="" )
