@@ -55,7 +55,7 @@
 #5. obtain SSD components by projecting data onto the weights. Dimensionality can be reduced 
 # by choosing only the first few components (ordered like in PCA)
 
-SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
+SSD.pipeline <- function(data, ..., denoise=T, plot=T, nCores=NULL) {
   ## Pipeline for the whole SSD procedure which takes care of the sequence
   ## of functions to execute; especially shines with subject data sets
   ## as the full paradigm gets parallelized. However, only the denoised
@@ -71,6 +71,7 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   #INPUT ---
   #data: continuous df or list of trials, slices, subjects
   #frequencies, transwidth, srate: see SSD.coefficients
+  #denoise: if True, components are projected back into original measurement space
   #plot: if True, frequency response of Signal/Noise is plotted (only if not parallelized)
   #      additional arguments of plot.frequencies may be supplied
   #rank: see SSD.denoise; if not supplied, defaults to q=0.1 for the auto-selection criterion
@@ -114,8 +115,17 @@ SSD.pipeline <- function(data, ..., plot=T, nCores=NULL) {
   }
   #do the SSD:
   SSD.out = SSD.apply(SSDdata)
-  #denoise data:
-  data = SSD.denoise(SSD.out, args.in$rank)
+  if (denoise) { #denoise data by projecting components onto patterns
+    data = SSD.denoise(SSD.out, args.in$rank)
+  } else { #no projection into original space
+    if ( is.null(args.in$rank) ) args.in$rank = .1
+    if ( args.in$rank < 1 ) { #auto-selection
+      args.in$rank = max(1, sum( SSD.out$lambda >= args.in$rank*IQR(SSD.out$lambda)+quantile(SSD.out$lambda, probs=.75) ) )
+      cat( "Auto-selection criterion yielded", args.in$rank, "components.\n" )
+    } #else fixed number of components
+    data = data.frame( SSD.out$info, SSD.out$components[,1:args.in$rank] )
+    attr(data, "rank") = args.in$rank
+  }
   return(data)
 }
 
