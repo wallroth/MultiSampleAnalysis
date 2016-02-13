@@ -124,12 +124,11 @@ SSD.pipeline <- function(data, ..., denoise=T, plot=T, nCores=NULL) {
       cat( "Auto-selection criterion yielded", args.in$rank, "components.\n" )
     } #else fixed number of components
     data = data.frame( SSD.out$info, SSD.out$components[,1:args.in$rank] )
-    attr(data, "rank") = args.in$rank
   }
   return(data)
 }
 
-SSD.coefficients <- function(frequencies, noise.width=2, ...) {
+SSD.coefficients <- function(frequencies, noise.width=2, signal.position="center", ...) {
   ## get SSD filter coefficients to be supplied to SSD.filter
   #INPUT ---
   #frequencies: 4/6 (or 2) values in this order:
@@ -144,6 +143,11 @@ SSD.coefficients <- function(frequencies, noise.width=2, ...) {
   #noise.width: defines the width of the unattenuated noise range
   #             is used to calculate the noise band if only signal band is 
   #             specified. Otherwise the value is ignored.
+  #signal.position: center, left, right; specifies if the frequency spectrum is closed to both sides
+  #                 of the signal or open on one side. The noise bands will either surround the siganal
+  #                 (center, default) or be only on the closed side of the signal spectrum
+  #                 i.e. if left, the signal spectrum is open to the left and a noise band will only be
+  #                 subtracted on the (closed) right side, e.g. when filtering the delta band (0-4Hz)
   #transwidth, srate, wtype: see filter.coefficients
   #transwidth will default to 1, wtype to blackman
   #RETURNS ---
@@ -151,6 +155,8 @@ SSD.coefficients <- function(frequencies, noise.width=2, ...) {
   #i.e. signal bandpass, noise bandpass, noise bandstop (optionally)
   #Note: at default settings, the noise edges will directly border on the signal edges
   #      to minimize spectral leakage. The borders are determined via the transition width
+  signal.position = tolower(signal.position)
+  if ( !signal.position %in% c("center","left","right") ) stop( "Undefined signal position. Options are 'center', 'left', 'right'." )
   args.coeff = .eval_ellipsis("filter.coefficients", ...)
   if ( is.null(list(...)$wtype) ) { #if not specified...
     args.coeff$wtype = "blackman" #default to blackman for smaller deviation
@@ -158,24 +164,50 @@ SSD.coefficients <- function(frequencies, noise.width=2, ...) {
   if ( is.null(list(...)$transwidth) ) {
     args.coeff$transwidth = 1 #default to 1
   }
-  #check frequency specifications
-  if ( length(frequencies) == 2 ) { #only signal defined
-    cat( "Only signal bandpass frequencies specified. Defining noise correspondingly:\n" )
-    #frequency is at the center of the band, so transition width has to be considered
-    #minimized spectral leakage with the edges of the transition zones next to each other:
-    noise.bs = c( frequencies[1] - args.coeff$transwidth, frequencies[2] + args.coeff$transwidth )
-    noise.bp = c( noise.bs[1] - noise.width, noise.bs[2] + noise.width )
-    frequencies = c( frequencies, noise.bp, noise.bs )
-    cat( "Noise bandpass from",frequencies[3],"-",frequencies[4],"Hz",
-         "and noise bandstop from",frequencies[5],"-",frequencies[6],"Hz.\n" )
-  }
-  if ( !length(frequencies) %in% c(4,6) ) { stop( "Incorrect frequency specification! ",
-                                                  "Set either 2, 4 or 6 frequencies." ) }
-  #get filter coefficients (b):
-  SSDcoeffs = list( signal.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[1:2], ftype="pass")) ), 
-                    noise.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[3:4], ftype="pass")) ) )
-  if ( length(frequencies) == 6 ) {
-    SSDcoeffs$noise.stop = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[5:6], ftype="stop")) )
+  if ( signal.position == "center" ) { #two-sided
+    #check frequency specifications
+    if ( length(frequencies) == 2 ) { #only signal defined
+      cat( "Only signal bandpass frequencies specified. Defining noise correspondingly:\n" )
+      #frequency is at the center of the band, so transition width has to be considered
+      #minimized spectral leakage with the edges of the transition zones next to each other:
+      noise.bs = c( frequencies[1] - args.coeff$transwidth, frequencies[2] + args.coeff$transwidth )
+      noise.bp = c( noise.bs[1] - noise.width, noise.bs[2] + noise.width )
+      frequencies = c( frequencies, noise.bp, noise.bs )
+      cat( "Noise bandpass from",frequencies[3],"-",frequencies[4],"Hz",
+           "and noise bandstop from",frequencies[5],"-",frequencies[6],"Hz.\n" )
+    }
+    if ( !length(frequencies) %in% c(4,6) ) stop( "Incorrect frequency specification! Set either 2, 4 or 6 frequencies." )
+    #get filter coefficients (b):
+    SSDcoeffs = list( signal.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[1:2], ftype="pass")) ), 
+                      noise.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[3:4], ftype="pass")) ) )
+    if ( length(frequencies) == 6 ) {
+      SSDcoeffs$noise.stop = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[5:6], ftype="stop")) )
+    }
+  } else { #left/right one-sided
+    #check frequency specifications
+    if ( length(frequencies) == 1 ) { #only signal defined
+      cat( "Only signal frequency specified. Defining noise correspondingly:\n" )
+      #frequency is at the center of the band, so transition width has to be considered
+      #minimized spectral leakage with the edges of the transition zones next to each other:
+      if ( signal.position == "right" ) {
+        ftypes = c("high","low")  #noise only on the left side of the signal
+        noise.bs = frequencies - args.coeff$transwidth
+        noise.bp = noise.bs - noise.width
+      } else { #left
+        ftypes = c("low","high") #noise only on the right side of the signal
+        noise.bs = frequencies + args.coeff$transwidth
+        noise.bp = noise.bs + noise.width
+      }
+      frequencies = c( frequencies, noise.bp, noise.bs )
+      cat( paste0("Noise ",ftypes[1],"pass at ",frequencies[2],", ",ftypes[2],"pass at ",frequencies[3]," Hz."),"\n" )
+    }
+    if ( !length(frequencies) %in% c(2,3) ) stop( "Incorrect frequency specification! Set either 1, 2 or 3 frequencies." )
+    #get filter coefficients (b):
+    SSDcoeffs = list( signal.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[1], ftype=ftypes[1])) ), 
+                      noise.pass = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[2], ftype=ftypes[1])) ) )
+    if ( length(frequencies) == 3 ) {
+      SSDcoeffs$noise.stop = do.call( filter.coefficients, modifyList(args.coeff, list(frequencies=frequencies[3], ftype=ftypes[2])) )
+    }
   }
   return(SSDcoeffs)
 }
