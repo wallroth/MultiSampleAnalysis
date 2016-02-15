@@ -81,12 +81,12 @@ decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NU
   #remove baseline for CSP procedure
   if ( !is.null(baseline) ) data = data.remove_samples(data, end=baseline)
   k = unique(data[,2]) #check outcome
-  if ( is.null(list(...)$silent) && length(k) > 2 ) { #one vs. the rest (OVR)
-    cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
+  if ( length(k) > 2 ) { #one vs. the rest (OVR)
+    if ( is.null(list(...)$silent) ) cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
     #sort k because otherwise its order will conform to the first appearance in data
     OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
       d = data.merge_classes(data, labels = k[!k %in% class], verbose=F)
-      decompose.CSP(data=d, npattern=npattern, features=F) #... only required for features
+      decompose.CSP(data=d, npattern=npattern, features=F, silent=list(...)$silent) #... only required for features
     })
     #column bind the per class OVR results
     filters = do.call(cbind, lapply(OVR, "[[", "filters"))
@@ -303,8 +303,8 @@ decompose.SpecCSP <- function(data, srate, npattern=3, p=0, q=1, prior=NULL, ite
   if ( is.null(prior) ) prior = c(0, srate/2) #full spectrum
   p = p + q
   k = unique(data[,2])
-  if ( is.null(list(...)$silent) && length(k) > 2 ) { #one vs. the rest (OVR)
-    cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
+  if ( length(k) > 2 ) { #one vs. the rest (OVR)
+    if ( is.null(list(...)$silent) ) cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
     #sort k because otherwise its order will conform to the first appearance in data
     OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
       d = data.merge_classes(data, labels = k[!k %in% class], verbose=F)
