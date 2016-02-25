@@ -76,8 +76,8 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
     args.slice$window = attr(data, "window")
     args.slice$overlap = attr(data, "overlap")
   }
-  k = .eval_ellipsis("data.split_folds", ...)$k #get k for the fold split
-  tol = .eval_ellipsis("data.permute_classes", ...)$tol #get tol for the permutations
+  k = ifelse(is.null(args.in$k), .eval_ellipsis("data.split_folds")$k, args.in$k) #get k for the fold split
+  tol = ifelse(is.null(args.in$tol), .eval_ellipsis("data.permute_classes")$tol, args.in$tol) #get tol for the permutations
   decomp = decompose != "NONE"
   decomp.method = paste0("decompose.", grep(decompose, c("CSP","SpecCSP","SPoC"), ignore.case=T, value=T)[1])
   decomp.name = substr(decomp.method, 11, 20)
@@ -566,8 +566,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     args.slice$window = attr(data, "window")
     args.slice$overlap = attr(data, "overlap")
   }
-  k = .eval_ellipsis("data.split_folds", ...)$k #get k for the fold split
-  tol = .eval_ellipsis("data.permute_classes", ...)$tol #get tol for the permutations
+  k = ifelse(is.null(args.in$k), .eval_ellipsis("data.split_folds")$k, args.in$k) #get k for the fold split
+  tol = ifelse(is.null(args.in$tol), .eval_ellipsis("data.permute_classes")$tol, args.in$tol) #get tol for the permutations
   decomp = decompose != "NONE"
   decomp.method = paste0("decompose.", grep(decompose, c("CSP","SpecCSP","SPoC"), ignore.case=T, value=T)[1])
   decomp.name = substr(decomp.method, 11, 20)
@@ -808,7 +808,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   return(out)
 }
 
-decode.test <- function(result, p.vals="wilcox", bootstrap.CI=F, dv="AUC", within.var="label", within.null="random",
+decode.test <- function(result, p.vals="none", bootstrap.CI=F, dv="AUC", within.var="label", within.null="random",
                         between="slice", id="subject", adjust="none", alpha=0.05, iterations=1000, nCores=NULL) {
   ## non-parametric testing at all slices for significant difference in decodability 
   ## between true and random labels. all operations are stratified for id.
@@ -846,7 +846,7 @@ decode.test <- function(result, p.vals="wilcox", bootstrap.CI=F, dv="AUC", withi
   #a summary df with means, CIs, p-values, significance indication
   p.vals = tolower(p.vals)
   if ( !p.vals %in% c("wilcox", "t-test", "permutation", "none") ) stop( "Undefined test. Options are: ",
-                                                                         "wilcox, t-test, permutation, none" )
+                                                                         "wilcox, t-test, permutation." )
   if ( any(alpha > 1) || any(alpha < 0) ) stop( "alpha must be in the range 0|1." )
   if ( class(result) == "list" ) result = plyr::ldply(result, .id=id)
   #check the columns
