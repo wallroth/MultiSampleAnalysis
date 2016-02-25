@@ -34,7 +34,8 @@ decode.GAT <- function(data, method="within", decompose="none", repetitions=1,
   .eval_package("foreach", load=T); .eval_package("caret")
   args.in = as.list( match.call() )[-c(1,2)]
   #make sure variable names are evaluated before they are passed on
-  args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  # args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in = lapply(args.in, eval)
   args.in$silent = T #suppress messages from decompose methods
   method = tolower(method)
   decompose = toupper(decompose)
@@ -313,7 +314,8 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
   args.in = as.list( match.call() )[-1]
   args.in = args.in[!grepl("train|test|fits", names(args.in))] #remove main input
   #make sure variable names are evaluated before they are passed on
-  args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  # args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in = lapply(args.in, eval)
   args.in$silent = T #suppress messages from decompose methods
   if ( method == "regression" && is.null(args.in$model) ) args.in$model = "Reg"
   .eval_package("foreach", load=T)
@@ -456,7 +458,7 @@ decode.eval <- function(train=NULL, test=NULL, fits=NULL, decompose="none",
                                                 dnn=c("Predicted Label", "True Label"))$table )
       } else { #regression
         res = list( RMSE = sqrt( mean((out - preds)^2) ), #Root mean squared error
-                    deviation = summary(out - preds ) ) #distribution of errors
+                    deviations = out - preds ) #distribution of errors
       }
       return(res)
     }
@@ -523,7 +525,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   .eval_package("foreach", load=T); .eval_package("caret")
   args.in = as.list( match.call() )[-c(1,2)]
   #make sure variable names are evaluated before they are passed on
-  args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  # args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
+  args.in = lapply(args.in, eval)
   args.in$silent = T #suppress messages from decompose methods
   args.test = .eval_ellipsis("decode.test", ...)
   method = tolower(method)
@@ -554,6 +557,7 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     outcome = attr( data.permute_classes(data, shuffle=F), "outcome" )
   }
   ## retrieve input arguments and prepare
+  args.in$verbose = F #prevent that verbose argument is passed to fitting functions
   if ( is.null(permutations) ) permutations = 0
   args.slice = .eval_ellipsis("data.split_slices", ...); args.slice$idx.out = T #save RAM
   if ( "slices" %in% attr(data, "type") && is.null(args.in$window) ) {
@@ -712,8 +716,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     fold.fits = setNames( fold.fits, paste0("fold", 1:k) )
     #create summary df
     acc.true = do.call(c, lapply(fold.fits, function(fit) sapply(fit[[1]], "[[", 1)) )
-    summary = data.frame( run=run, fold=rep(1:k, each=length(slicenums)), 
-                          slice=slicenums, label="true", acc=acc.true, row.names=NULL )
+    summary = data.frame( run=run, fold=rep(1:k, each=length(slicenums)), slice=slicenums, label="true", 
+                          acc=acc.true, row.names=NULL )
     if (permutations > 0) {
       acc.random = do.call(c, lapply(fold.fits, function(fit) sapply(fit[[2]], function(rep) sapply(rep, "[[", 1)) ) )
       summary = rbind(summary, data.frame( run=run, fold=rep(1:k, each=length(slicenums)*permutations), 
@@ -722,10 +726,31 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     #replace placeholder name with actual performance measurement name
     fnames = names(fold.fits$fold1[[1]]$slice1)[1:2] #1st fold, true fits, 1st slice
     names(summary)[5] = fnames[1]
+    #count successes/failures of classification
+    if ( fnames[2] == "predictions" ) { 
+      preds = do.call(rbind, lapply(fold.fits, function(fold) {
+        do.call(rbind, lapply(slicenums, function(slice) {
+          tab = fold[[1]][[slice]][["predictions"]] #true performance
+          data.frame( success=sum(diag(tab)), failure=sum(tab[as.logical(upper.tri(tab)+lower.tri(tab))]) )
+        }) )
+      }) )
+      if (permutations>0) {
+        preds.rand = do.call( rbind, lapply(fold.fits, function(fold) {
+          do.call( rbind, lapply(1:permutations, function(perm) {
+            do.call( rbind, lapply( fold[[2]][[perm]], function(slice) {
+              tab = slice[["predictions"]] #random performance  
+              data.frame( success=sum(diag(tab)), failure=sum(tab[as.logical(upper.tri(tab)+lower.tri(tab))]) )
+            }) )
+          }) )
+        }) )
+        preds = rbind(preds, preds.rand)
+      }
+      summary = data.frame(summary, preds, row.names=NULL)
+    }
     output = list(summary = summary, fits = lapply(fold.fits, "[[", 1)) #true label fits
-    if (!verbose) { #replace with aggregated predictions
+    if (!verbose) { #replace with summed predictions
       output$fits = lapply(slicenums, function(s) { Reduce( "+", lapply(1:k, function(f) {
-        output$fits[[f]][[s]][[ fnames[2] ]] }) )/k }) #average over folds per slice
+        output$fits[[f]][[s]][[ fnames[2] ]] }) ) }) #sum over folds per slice
     }
     result[[run]] = output
   } #end of runs
@@ -747,9 +772,9 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   fits = lapply(result, "[[", "fits")
   if (verbose) { #add entire fits to output
     output$fits = fits
-  } else { #add only aggregation of predictions to output
+  } else { #add only sum of predictions to output
     output[[ fnames[2] ]] = setNames( lapply(slicenums, function(s) {
-      Reduce("+", lapply(fits, "[[", s))/repetitions }), paste0("slice",slicenums) )
+      Reduce("+", lapply(fits, "[[", s)) }), paste0("slice",slicenums) )
   }
   .parallel_check(output=pcheck) #prints final time
   return( .unnest(output) ) #return and remove nesting where necessary
@@ -783,31 +808,45 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   return(out)
 }
 
-decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="label", within.null="random",
-                        between="slice", id="subject", adjust="none", alpha=0.05, iterations=10000, nCores=NULL) {
+decode.test <- function(result, p.vals="wilcox", bootstrap.CI=F, dv="AUC", within.var="label", within.null="random",
+                        between="slice", id="subject", adjust="none", alpha=0.05, iterations=1000, nCores=NULL) {
   ## non-parametric testing at all slices for significant difference in decodability 
   ## between true and random labels. all operations are stratified for id.
   #INPUT ---
   #result: df with columns specified by dv, pair and group
   #        or a list of such dfs corresponding to different subjects
-  #p.vals: if True, p-values are computed by switching the labels of performance scores randomly
+  #p.vals: one of: wilcox, t-test, permutation, none
+  #        NOTE: care that fold splits or permutations within folds were not repeated, otherwise
+  #              the variance can be made arbitrarily small which will then lead to grossly underestimated p-values!
+  #        permutation: p-values are computed by switching the labels of performance scores randomly
   #        and computing the mean within each permuted label category on each iteration. 
   #        p-value = the number of times the permuted mean was higher than the true mean
-  #bootstrap: if True, resamples the random labels with replacement and extracts the
-  #           confidence level on each iteration. Yields as many values as iterations
-  #           which are averaged to get the final CI to which the true performance
-  #           will be compared. Only sensible if too few permutations were performed.
-  #           if False, the CIs are computed directly on the dv values of within.null
+  #        the correction suggested by Smyth & Phipson (2010) is applied to the p-value estimation:
+  #        instead of sum/N one uses (sum+1)/(N+1) to accomodate the fact that from all possible
+  #        scenarios one includes the original data, therefore p-values cannot be 0 but instead only 1/(N+1)
+  #        this is especially important when correcting for multiple tests as p-values of 0 will stay 0
+  #        because permutations are performed with replacement (ie possible combinations can be repeated),
+  #        this biased estimate is rather conservative and will overestimate p-values the smaller N is chosen
+  #bootstrap.CI: if True, resamples the random labels with replacement and extracts the
+  #              confidence level on each iteration. Yields as many values as iterations
+  #              which are averaged to get the final CI to which the true performance
+  #              will be compared. Only sensible if too few permutations were performed.
+  #              if False, the CIs are computed directly on the dv values of within.null
   #dv: dependent variable, column with the performance score; required
   #within.var: pair to compare, e.g. column with the labels (true vs. random); required
   #within.null: within.var's value to compute the CIs with (representing the null hypothesis)
   #between: variable that groups the dv into separate segments; can be left empty
-  #id: variable that stratifies all computations into independent parts; can be left empty
+  #id: variable that stratifies all computations into independent parts; 
+  #    most likely one of 'subject' or 'fold' (for p-values in single subject case)
+  #    for bootstrapped CIs the id can be left empty (i.e. single subject case)
   #adjust: correction method for the p-values, default is "none"
   #alpha: significance threshold to test p-values against, CIs are computed for this level
   #iterations: number of times to repeat the permutations and/or bootstrap 
   #RETURNS ---
   #a summary df with means, CIs, p-values, significance indication
+  p.vals = tolower(p.vals)
+  if ( !p.vals %in% c("wilcox", "t-test", "permutation", "none") ) stop( "Undefined test. Options are: ",
+                                                                         "wilcox, t-test, permutation, none" )
   if ( any(alpha > 1) || any(alpha < 0) ) stop( "alpha must be in the range 0|1." )
   if ( class(result) == "list" ) result = plyr::ldply(result, .id=id)
   #check the columns
@@ -819,8 +858,8 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
     result[[id]] = 1 #temporary column to split if no id supplied
   }
   result = result[ order(result[[id]]), ] #sort by id for stratification later
-  if ( any( c(bootstrap, p.vals) ) ) { #prepare parallelization if necessary
-    .eval_package("foreach", load=T)
+  if ( any( c(bootstrap.CI, p.vals == "permutation") ) ) { #prepare parallelization if necessary
+    .eval_package("foreach", load=T); .eval_package("statmod")
     if ( nzchar(between) ) { #parallelize time points (between)
       res.groups = split(result, result[,between])
     } else {
@@ -830,26 +869,44 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
     outlen = ifelse(length(res.groups) > 100, length(res.groups), 100) #for .maxcombine argument of foreach
   }
   alpha = sort(alpha, decreasing=T) #in case of multiple values
-  if (p.vals) { #get permutation-based p-values
-    permutefun <- function(res) { #permutations under the null
-      nulldiff = replicate(iterations, {
-        #shuffle labels while retaining group structure (stratification for id)
-        perm = as.vector( sapply(unique( res[[id]] ), function(sub) {
-          sample( res[[within.var]][ res[[id]] == sub ] , replace=F ) }) )
-        null1 = res[[dv]][ perm != within.null ] #'true' labels
-        null2 = res[[dv]][ perm == within.null ] #'random' labels
-        mean(null1) - mean(null2) #(null) difference after permutation
-      })
-      truediff = mean( res[[dv]][ res[[within.var]] != within.null ] ) - 
-        mean( res[[dv]][ res[[within.var]] == within.null ] )
-      #one-sided p-value: number of times nulldiff >= truediff / N
-      return( mean( nulldiff >= truediff ) )
+  if (p.vals != "none") { #get p-values
+    if (id == ".tmp") stop( "Cannot calculate p-values with one observation per group. Specify fold as id in the single subject case ",
+                            "but make sure the fold splits are independent, i.e. not repeated several times which would reduce the ",
+                            "variance and lead to underestimated p-values." )
+    if (p.vals == "permutation") {
+      pdat = lapply(res.groups, function(d) aggregate( as.formula( paste(dv,"~",id,"+",within.var) ), data=d, mean )) #2 values per id
+      permutefun <- function(res) { #permutations under the null
+        nulldiff = replicate(iterations, {
+          perm = sample( res[[within.var]], replace=F ) #shuffle labels
+          null1 = res[[dv]][ perm != within.null ] #'true' labels
+          null2 = res[[dv]][ perm == within.null ] #'random' labels
+          mean(null1) - mean(null2) #(null) difference between permutations
+        })
+        #compute the test statistic: mean difference of the two groups (true vs. random labels)
+        truediff = mean( res[[dv]][ res[[within.var]] != within.null ] ) - 
+          mean( res[[dv]][ res[[within.var]] == within.null ] )
+        #one-sided p-value: number of times nulldiff >= truediff / N but with bias correction
+        nump = sum( abs(nulldiff) >= truediff )
+        n1 = length( res[[dv]][ res[[within.var]] != within.null ] ) #group 1 samples
+        n2 = length( res[[dv]][ res[[within.var]] == within.null ] ) #group 2 samples
+        return( statmod::permp(x=nump, nperm=iterations, twosided=F, n1=n1, n2=n2) ) #(sum+1)/(N+1) (no 0 p-values)
+      }
+      pvals = foreach(res=pdat, .combine=c, .multicombine=T, .maxcombine=outlen) %dopar%
+        permutefun(res)
+    } else { #wilcox or t.test
+      pdat = aggregate(as.formula( paste(dv,"~",sub("^\\+", "", paste0(between,"+",id,"+",within.var))) ), data=result, mean)
+      if (nzchar(between)) pdat = split(pdat, pdat[,between]) else pdat = list(pdat)
+      if (p.vals == "wilcox") {
+        pvals = sapply(pdat, function(d) {
+          wilcox.test(as.formula(paste(dv,"~",within.var)), paired=T, data=d, alternative="greater")$p.value })
+      } else {
+        pvals = sapply(pdat, function(d) {
+          t.test(as.formula(paste(dv,"~",within.var)), paired=T, data=d, alternative="greater")$p.value })
+      }
     }
-    pvals = foreach(res=res.groups, .combine=c, .multicombine=T, .maxcombine=outlen) %dopar%
-      permutefun(res)
-  }
+  } 
   #get CIs
-  if (bootstrap) { #obtain CI thresholds via bootstrap
+  if (bootstrap.CI) { #obtain CI thresholds via bootstrap
     bootfun <- function(null) { #computes the mean of n bootstrapped quantiles
       CI = matrix( replicate(iterations, {
         #sampling with replacement stratified for id
@@ -870,7 +927,7 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
     }
   }
   if ( !nzchar(between) ) CIs = matrix(CIs, ncol=length(alpha)) #make sure indexing works on columns for output
-  if ( any( c(bootstrap, p.vals) ) ) .parallel_check(output=pcheck)
+  if ( any( c(bootstrap.CI, p.vals == "permutation") ) ) .parallel_check(output=pcheck)
   #collect result summary df
   summary = aggregate( as.formula( paste(dv,"~",sub("^\\+", "", paste0(between,"+",within.var))) ), data=result, mean )
   #get mean difference
@@ -881,7 +938,7 @@ decode.test <- function(result, p.vals=T, bootstrap=F, dv="AUC", within.var="lab
   for ( i in seq_along(alpha) ) {
     summary[[ paste0("CI",100-alpha[i]*100) ]] = CIs[,i] #add CIs to summary
   }
-  if (p.vals) {
+  if (p.vals != "none") {
     summary$p = pvals
     if ( tolower(adjust) != "none" ) summary$p.adj = p.adjust( pvals, method=adjust )
     sign.sum = sapply(summary[[ncol(summary)]], function(p) sum(p<alpha)) #count pvals < alpha (might be multiple alphas)
@@ -1028,7 +1085,7 @@ data.split_folds <- function(data, k=5, idx.out=F) {
   .eval_package("caret")
   data = data.permute_classes(data, shuffle=F) #get type and outcome
   if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.split_folds, k, split)
+    data = lapply(data, data.split_folds, k, idx.out)
     attr(data, "type") = "subjects"
     return(data)
   } 
@@ -1065,7 +1122,7 @@ data.fit <- function(train, test=NULL, model="LogReg",
   #AUC: area under the curve, prediction accuracy of the model (if test)
   #predictions: confusion table of predictions and true values (if test)
   #fit: model fit with the respective list structure
-  models = c("Reg", "LogReg", "SVM", "LDA", "rLDA") #currently implemented models
+  models = c("Reg", "LogReg", "SVM", "LDA", "SDA", "rLDA") #currently implemented models
   if ( !toupper(model) %in% toupper(models) ) {
     stop( "Undefined model selected. Current options are: ", 
           paste(models, collapse=", "), "." ) 
@@ -1096,11 +1153,14 @@ data.fit <- function(train, test=NULL, model="LogReg",
         args.in$type = 12 #dual L2 reg
       }
     } 
-    fit = do.call( LiblineaR::LiblineaR, modifyList(args.in, 
-                        list(data=train, target=train.outcome)) )
+    fit = do.call( LiblineaR::LiblineaR, modifyList(args.in, list(data=train, target=train.outcome)) )
   } else if ( toupper(model) == "LDA" ) {
     .eval_package("MASS")
     fit = MASS::lda(x=train, grouping=train.outcome)    
+  } else if ( toupper(model) == "SDA" ) { #shrinkage LDA
+    .eval_package("sda")
+    args.in = .eval_ellipsis(sda::sda, ...)
+    fit = do.call( sda::sda, modifyList(args.in, list(Xtrain=train, L=train.outcome, verbose=F)) )
   } else if ( toupper(model) == "RLDA" ) { #robust regularized LDA
     .eval_package("rrlda", load=T) #sadly does not work without attaching
     args.in = .eval_ellipsis("rrlda", ...)
@@ -1117,7 +1177,7 @@ data.fit <- function(train, test=NULL, model="LogReg",
   test.outcome =  test[,2]
   test = scale(test[, measurements], center, scale) #center/scale
   #get predictions
-  preds <- predict(fit, test)[[1]]
+  preds <- predict(fit, test, verbose=F)[[1]]
   if ( toupper(model) != "REG" ) {
     preds = as.ordered(preds)
     if ( length(unique(test.outcome)) > 2 ) {
@@ -1130,7 +1190,7 @@ data.fit <- function(train, test=NULL, model="LogReg",
   } else { #regression
     test.outcome = as.numeric(test.outcome) #making sure outcome is numeric
     out = list( RMSE = sqrt( mean((test.outcome - preds)^2) ), #Root mean squared error
-                deviation = summary( test.outcome - preds ) )#distribution of errors
+                deviations = test.outcome - preds ) #distribution of errors
   }
   out$fit = fit
   return(out)
