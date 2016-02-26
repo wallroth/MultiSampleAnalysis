@@ -601,12 +601,8 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
   pcheck = .parallel_check(required=length(slicenums), nCores=nCores)
   data = data.split_trials(data, strip=F) #change into trial format
   if ( k > length(data) ) stop( "Can't have more folds (",k,") than data partitions (",length(data),")." )
-  LOO = k == length(data) #leave one out
-  if ( LOO && repetitions > 1 ) {
-    warning( "Leave-one-out: no randomness in the fold assignment. Setting repetitions to 1." )
-    repetitions = 1
-  }
-  
+  LOO = k == length(data) && method == "between" #leave one out
+
   ## internal functions ##
   slice_fit <- function(train, test) {
     ## internal function to fit train and test slice sets (lists of trials)
