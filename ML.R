@@ -544,9 +544,11 @@ decode <- function(data, method="within", decompose="none", repetitions=1,
     result = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
       do.call(decode, utils::modifyList( args.in, list(data=d, nCores=1) ))
     result = .output_merge(result)
-    summary = do.call(decode.test, utils::modifyList( args.test, 
-          list(result=result$result, between=ifelse("slice" %in% names(result$summary), "slice", ""), nCores=list() )))
-    result = c(list(summary.overall = summary), result)
+    if ( permutations > 0 ) {
+      summary = do.call(decode.test, utils::modifyList( args.test, 
+            list(result=result$result, between=ifelse("slice" %in% names(result$summary), "slice", ""), nCores=list() )))
+      result = c(list(summary.overall = summary), result)
+    }
     .parallel_check(output=pcheck)
     return(result)
   } else if ( method != "within" && !"subjects" %in% attr(data, "type") ) {
