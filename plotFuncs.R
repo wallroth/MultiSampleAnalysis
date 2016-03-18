@@ -26,9 +26,9 @@
 }
 
 plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F, threshold=F, xvar="slice", yvar="AUC", groupvar="label", 
-                        id="subject", xrange=c(-500,2000), xticks=NULL, xlabels=NULL, size=NULL, signpos=NULL, 
+                        idvar="subject", xrange=c(-500,2000), xticks=NULL, xlabels=NULL, size=NULL, signpos=NULL, signcol=NULL,
                         hline=0.5, ylims=NULL, xlab="Time (ms)", ylab="Decoding Accuracy (AUC)", 
-                        txt="", txtpos=NULL, ggTheme=.ggTheme(), cols=c("#0072BD", "#D95319"), ...) {
+                        txt="", txtcol="#666666", txtpos=NULL, ggTheme=.ggTheme(), cols=c("#0072BD", "#D95319"), ...) {
   ## provide visualization of per slice averaged decoding result
   #INPUT ---
   #result: list as output by decoding functions with summary and significance
@@ -39,7 +39,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
   #threshold: indicate 95th quantile of permutation performance
   #xvar, yvar: variable on the x-/y-axis
   #groupvar: grouping variable which separates the x/y data points, can be left empty
-  #id: subject column, can be left empty
+  #idvar: subject column, can be left empty
   #xrange: actual time range of measurements, i.e time of 1st/last sample
   #        the timepoints are then set as the transition from one slice to the next
   #xticks: ticks to put on the x axis, defaults to all slices
@@ -69,15 +69,16 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
     }
   }
   .eval_package("ggplot2", load=T)
-  subjects = !is.null(id) && nzchar(id) && id %in% names(data) #subject id in data
+  subjects = !is.null(idvar) && nzchar(idvar) && idvar %in% names(data) #subject id in data
   if (!subjects) {
-    id = ".tmp"
-    data[[id]] = 1 #temporary column to split if no id supplied
+    idvar = ".tmp"
+    data[[idvar]] = 1 #temporary column to split if no id supplied
   }
   average = average && is.null(multi.layout) #one plot 
   args.test = .eval_ellipsis("decode.test", ...)
   args.test = lapply(args.test[-1], eval) #evaluate the arguments
   args.test$dv = yvar
+  if ( is.null(list(...)$id) ) args.test$id = idvar
   if ( is.null(list(...)$p.vals) ) args.test$p.vals = "none"
   timeDomain = !is.null(groupvar) && nzchar(groupvar) #xAxis = time
   lineplot = tolower(type) == "line" && timeDomain
@@ -89,9 +90,9 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
       .eval_package("foreach", load=T)
       bootfun <- function(xdata) {
         means = replicate(args.test$iterations, {
-          #sampling with replacement stratified for id
-          x = as.vector( sapply(unique( xdata[[id]] ), function(sub) {
-            sample( xdata[[yvar]][ xdata[[id]] == sub ] , replace=T ) }) )
+          #sampling with replacement stratified for idvar
+          x = as.vector( sapply(unique( xdata[[idvar]] ), function(sub) {
+            sample( xdata[[yvar]][ xdata[[idvar]] == sub ] , replace=T ) }) )
           mean(x)
         })
         return( quantile(means, probs=c(.025,.975)) ) #95% CI
@@ -106,7 +107,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
             }) )
           }
       } else { #CIs for each subject individually
-        tmp = split(data, data[,id]) #parallelize id (subjects)
+        tmp = split(data, data[,idvar]) #parallelize id (subjects)
         pcheck = .parallel_check(required=length(tmp), nCores=args.test$nCores)
         CIs = foreach(sub=tmp, .combine=list, .multicombine=T, .maxcombine=length(tmp)) %dopar%
           {
@@ -123,7 +124,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
         CIs = aggregate( as.formula(paste(yvar,"~",groupvar,"+",xvar)), data=data, 
                          FUN=function(x) { m = mean(x); se = sd(x)/sqrt(length(x)); return(c(m-1.96*se, m+1.96*se)) } )[[3]]
       } else {
-        CIs = lapply( split(data, data[,id]), function(d) {
+        CIs = lapply( split(data, data[,idvar]), function(d) {
           aggregate( as.formula(paste(yvar,"~",groupvar,"+",xvar)), data=d, 
                      FUN=function(x) { m = mean(x); se = sd(x)/sqrt(length(x)); return(c(m-1.96*se, m+1.96*se)) } )[[3]] })
       }
@@ -134,21 +135,21 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
   if ( timeDomain && (threshold || args.test$p.vals != "none") ) {
     if ( "summary" %in% names(result) ) { #already computed
       signtest = result$summary
-      if ( id %in% names(signtest) ) { #contains result of each subject
+      if ( idvar %in% names(signtest) ) { #contains result of each subject
         if ( average && "summary.overall" %in% names(result) ) { #average already computed
           signtest = result$summary.overall
         } else if (!average) {
-          signtest = split(signtest, signtest[,id]) #split for subjects
+          signtest = split(signtest, signtest[,idvar]) #split for subjects
         } else { #average but no summary.overall present
-          signtest = do.call(decode.test, modifyList( args.test, list(result=data, id=id) ))    
+          signtest = do.call(decode.test, modifyList( args.test, list(result=data) ))    
         }
       } #else no id present
     } else { #no summary
       if (is.null(multi.layout)) { #also applies to single subject/across/between case
         signtest = do.call(decode.test, modifyList( args.test, list(result=data)) )
       } else { #evaluate significance for each subject individually
-        tmp = split(data, data[,id])
-        signtest = lapply( tmp, function(d) do.call(decode.test, modifyList( args.test, list(result=d, id="fold") )) )
+        tmp = split(data, data[,idvar])
+        signtest = lapply( tmp, function(d) do.call(decode.test, modifyList( args.test, list(result=d) )) )
       }
     }
     if ( args.test$p.vals != "none" && (args.test$adjust != "none" || !is.null(list(...)$alpha)) ) {
@@ -194,14 +195,14 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
         if (SE) data = data.frame(data, CI=unname(CIs)) #add CI to data as CI.1 and CI.2
         if (threshold) data$threshold = signtest[[ grep("CI",names(signtest))[1] ]][ data[[xvar]] ]
       } else {
-        data = aggregate( as.formula( paste(yvar,"~",groupvar,"+",xvar,"+ time +",id) ), data=data, mean )
+        data = aggregate( as.formula( paste(yvar,"~",groupvar,"+",xvar,"+ time +",idvar) ), data=data, mean )
         if (SE) {
           CIs = plyr::rbind.fill.matrix(CIs) #bind list together
           data = data.frame(data, CI=unname(CIs)) #add CI to data as CI.1 and CI.2
         }
         if (threshold) {
           data$threshold = do.call(c, lapply(signtest, function(d) {
-            d[[ grep("CI",names(sub))[1] ]][ data[[xvar]][ data[[id]] == unique(d[[id]]) ] ]
+            d[[ grep("CI",names(sub))[1] ]][ data[[xvar]][ data[[idvar]] == unique(d[[idvar]]) ] ]
           }) )
         }
       }
@@ -226,6 +227,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
     ylabels[ seq(2, length(ybreaks), 2) ] = "" #remove every 2nd
   }
   if (is.null(signpos)) signpos = ylims[2]-ysteps #significance indicator ypos
+  if (is.null(signcol)) signcol = cols[1]
   ## preparation end ##
   
   ggLineplot <- function(data, signtest=NULL, txt="") {
@@ -235,7 +237,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
       geom_hline(yintercept=hline , linetype="dotted", size=0.1) + #chance level indication
       coord_cartesian(ylim=ylims) + scale_y_continuous(breaks=ybreaks, labels=ylabels) +
       scale_x_continuous(breaks=xticks, labels=xlabels, expand=c(0.01,0.01)) +
-      annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col="#666666", size=5) +
+      annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=5) +
       labs(x=xlab, y=ylab) + ggTheme
     if ( xrange[1] < (0 - diff(timepoints[1:2])) ) {
       p = p + geom_vline(xintercept=0 , linetype="dashed", size=0.1) #time 0
@@ -250,12 +252,13 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
     if (args.test$p.vals != "none") { #add significance indication
       # p = p + annotate("text", x=timepoints, y=signpos, label=signtest$sign, col="black", size=5)
       signtime = timepoints[ as.logical(nchar(signtest$sign)) ] #significant timepoints
+      stepsize = diff(timepoints[1:2])/2 #for central alignment of timepoint to marker
       consec = rle( nchar(signtest$sign) ) #consecutive significant timepoints
       consec = consec$lengths[ as.logical(consec$values) ]
       end = signtime[ cumsum(consec) ] #offsets of significance
       start = signtime[ cumsum(consec)+1-consec ] #onsets of significance
       for (i in seq_along(start)) {
-        p = p + geom_segment(x=start[i], xend=end[i], y=signpos, yend=signpos, size=size, col=cols[1])
+        p = p + geom_segment(x=start[i]-stepsize, xend=end[i]+stepsize, y=signpos, yend=signpos, size=size, col=signcol)
       }
     }
     if (SE) { #add standard error of the mean
@@ -277,7 +280,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
       geom_hline(yintercept=hline, linetype="dotted", size=0.1) + #chance level indication
       geom_boxplot(size=size, outlier.size=size/2) +
       coord_cartesian(ylim=ylims) + scale_y_continuous(breaks=ybreaks, labels=ylabels) +
-      annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col="#666666", size=5) +
+      annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=5) +
       labs(x=xlab, y=ylab) + ggTheme
     if ( timeDomain && xrange[1] < (0 - diff(timepoints[1:2])) ) {
       p = p + geom_vline(xintercept=0 , linetype="dashed", size=0.1) #time 0
@@ -308,15 +311,15 @@ plot.decode <- function(result, multi.layout=NULL, average=T, type="line", SE=F,
   } else { #no averaging
     if (is.null(multi.layout)) { #single plot
       if ("label" %in% names(data)) data = subset(data, label == "true")
-      cols = colorRampPalette(c("gray30","gray90"), alpha=T)(length(unique(data[[id]])))
+      cols = colorRampPalette(c("gray30","gray90"), alpha=T)(length(unique(data[[idvar]])))
       ggTheme$legend.position = "none"
-      groupvar = id
-      data[[id]] = factor(data[[id]])
+      groupvar = idvar
+      data[[idvar]] = factor(data[[idvar]])
       p = do.call(plotStr, list(data, signtest, txt))
       return(p)
     } else { #multiple plots
       .eval_package("gridExtra", load=T)
-      data = split(data, data[,id])
+      data = split(data, data[,idvar])
       if ( length(txt) != length(data) ) txt = paste0(txt, seq_along(data))
       plist = lapply( seq_along(data), function(sub) do.call(plotStr, list( data[[sub]], signtest[[sub]], txt[[sub]] )) )  
       multipage = multi.layout[1] * multi.layout[2] #plots per page
