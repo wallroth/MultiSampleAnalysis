@@ -2,7 +2,7 @@
 
 # ToDo: implement regularization for CSP ? cf. Lu et al. 2010
 
-data.project <- function(data, weights, approximate=T, logtransform=T) {
+data.project <- function(data, filters, approx=T, logscale=T) {
   ## project measurements onto weights (spatial CSP/SpecCSP/SPoC filters)
   ## the resulting features are an approximation of the "true" underlying signal,
   ## i.e. with respect to an external target variable
@@ -10,141 +10,103 @@ data.project <- function(data, weights, approximate=T, logtransform=T) {
   ## that hopefully only the signal of interest will be left, cf. Haufe et al. 2014, p.98
   ## each projection captures a different spatial localization
   #INPUT ---
-  #data: df or list of trials, slices
-  #weights: spatial filters, e.g. output by decompose.CSP
-  #approximate: if True, the variance per trial is computed to approximate band power
-  #             otherwise, the components are returned (same number of rows as data)
-  #logtransform: if True, variance is logtransformed (a form of scaling variance)
-  data = data.set_type(data)
-  if ( "slices" %in% attr(data, "type") ) {
-    data = data.split_trials( data, strip=T )
-  } else {
-    data = data.check(data, aslist=T, strip=T)
-  }
-  if ( "filters" %in% names(weights) ) { #input is a list from CSP/SPoC
-    weights = weights$filters
-  } 
-  projection = lapply(data, function(trial) as.matrix(trial) %*% weights)
-  if (approximate) { #variance per trial
-    features = t( sapply(projection, apply, 2, var) ) #column-wise
-    if (logtransform) { 
-      if ( identical(min(features), 0) ) { #prevent -Inf with log(0)
-        #replace 0 with the minimum of 10^-30 or smallest features value after exclusion of 0
-        features[ which(features<=0) ] = min( 10^-30, min( features[ which(features>0) ] ) )
+  #filters: spatial filters, e.g. output by decompose.CSP
+  #approx: if True, the variance per trial is computed to approximate band power
+  #        otherwise, the components are returned (same number of rows as data)
+  #logscale: if True, variance is logtransformed (a form of scaling variance)
+  weights = grep("filter", names(filters))
+  nm = setdiff( names(data), key(data) )
+  projection = data[, { #project measurements onto the spatial filters
+    features = as.matrix(.SD) %*% as.matrix( filters[subject == .BY$subject, .SD, .SDcols=weights] )
+    lapply(1:length(weights), function(f) {
+      if (approx) {
+        feat = var(features[,f]) #component variance
+        ifelse(logscale, ifelse(feat > 0, log(feat), -60), feat) #replace -Inf with -60 (~ 10^-27)
+      } else {
+        features[,f]
       }
-      features = log(features)
-    }
-  } else { #components
-    features = plyr::rbind.fill.matrix( projection ) #rebind list to matrix
-  }
-  return(features)
+    })
+  }, .SDcols=nm, by=.(subject,trial,outcome)]
+  return( data.check(projection[, sample := if (approx) 1 else data[, sample] ])[] ) #add back sample info
 }
 
-decompose.CSP <- function(data, npattern=3, baseline=NULL, features=T, nCores=NULL, ...) {
+decompose.CSP <- function(data, npattern=3) {
   ## Common spatial pattern algorithm, cf. Lemm et al. 2005, Blankertz et al. 2008
   ## CSP paradigm: create spatial filters (weights) which can be used
   ## to extract signals of interest (via projection) from the data measurements
   ## resulting features are maximally informative with respect to the contrasted binary classes
   #INPUT ---
-  #data: df or list of trials, slices, subjects 
   #npattern: patterns to extract * 2 (for each condition), 
   # -> if too low the features may not contain sufficient information for the classifiers
   # -> if too high, risk of overfitting
-  #baseline: define last sample of baseline (if any) so that it will be excluded 
-  #          for the CSP procedure. If Null, no samples are removed.
-  #features: if T, features are computed and returned
-  #nCores: if data is a subject list, number of CPU cores to use for parallelization
-  #        if NULL, automatic selection; if 1, sequential execution
-  #        if an empty list, an externally registered cluster will be used
-  #RETURNS ---
-  #list with 3 or 5 elements (if features = T)
-  #filters, patterns, lambda, (features, outcome)
-  #filters are the weights to be used for projection, patterns are the 
-  #corresponding spatial activation pattern (inverse of the filters)
-  #lambda are the eigenvalues (effect sizes) corresponding to the filters
   #NOTE: if outcome is not binary, one vs. the rest approach is taken
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
-    pcheck = .parallel_check(required=length(data), nCores=nCores)
-    args.in = as.list( match.call() )[-c(1,2)]
-    #make sure variable names are evaluated before they are passed on
-    args.in = lapply(args.in, function(x) if (class(x)=="name") eval(x) else x)
-    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
-    CSPresult = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
-      do.call(decompose.CSP, utils::modifyList( args.in, list(data=d) ))
-    .parallel_check(output=pcheck)
-    CSPresult = setNames( CSPresult, paste0("subject", seq_along(data)) )
-    attr(CSPresult, "type") = "subjects"
-    return(CSPresult)
-  }
-  data = data.check(data, aslist=F)
-  #remove baseline for CSP procedure
-  if ( !is.null(baseline) ) data = data.remove_samples(data, end=baseline)
-  k = unique(data[,2]) #check outcome
+  #ToDo: currently just centered. (x'*X / trace) (Lu et al.)?
+  data = data.check(data)
+  args.in = lapply( as.list(match.call())[-c(1,2)], eval )
+  k = data[, sort(unique(outcome))] #check outcome and sort (otherwise its order will conform to the first appearance in data)
   if ( length(k) > 2 ) { #one vs. the rest (OVR)
-    if ( is.null(list(...)$silent) ) cat( "More than two classes; switching to OVR CSP for multi-class solution.\n" )
-    #sort k because otherwise its order will conform to the first appearance in data
-    OVR = lapply(sort(k), function(class) { #collapse all other classes to one level ("rest")
-      d = data.merge_classes(data, labels = k[!k %in% class], verbose=F)
-      decompose.CSP(data=d, npattern=npattern, features=F, silent=list(...)$silent) #... only required for features
+    cat( "More than two classes; switching to one-vs-rest CSP for multi-class solution.\n" )
+    OVR = lapply(seq_along(k), function(i) { #collapse all other classes to one level ("rest")
+      decompose.CSP(data=data.merge_classes(data, classes=k[!k %in% k[i]], new.labels=paste0("REST",i), copy=T), npattern=npattern)
     })
-    #column bind the per class OVR results
-    filters = do.call(cbind, lapply(OVR, "[[", "filters"))
-    patterns = do.call(cbind, lapply(OVR, "[[", "patterns"))
-    lambda = do.call(c, lapply(OVR, "[[", "lambda"))
+    for (i in 2:length(OVR)) set(OVR[[i]], j="subject", value=NULL) #remove duplicate subject columns
+    output = do.call(cbind, OVR) #column bind the per class OVR results
+  } else if ( length(k) == 2 ) { #binary
+    nm = setdiff( names(data), key(data) )
+    nmV = paste0("V",1:length(nm)) #overwritten column names after computation of C
+    #get trial-averaged Cov-matrix per condition
+    if ( data[.N, sample > 1] ) { #more than 1 sample: compute within trials
+      C = data[, {
+        mat = as.matrix(.SD) #plug into matrix format first (this conversion is the bottleneck)
+        C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(nm), byrow=T ) )
+        lapply(1:length(nm), function(ch) C[,ch])
+      }, .SDcols = nm, by=.(subject,outcome,trial)][, .idx := 1:length(nm)][, { #add channel index column
+        lapply(.SD, mean) }, .SDcols=nmV, by=.(subject,outcome,.idx)] #averaged covariance matrix per outcome/subject
+    } else { #only 1 sample per trial: compute across trials
+      C = data[, { 
+        mat = as.matrix(.SD) #plug into matrix format first (this conversion is the bottleneck)
+        C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(nm), byrow=T ) )
+        lapply(1:length(nm), function(ch) C[,ch])
+      }, .SDcols=nm, by=.(subject,outcome)]
+    }
+    setkeyv(C, c("subject","outcome")) #sort for outcome
+    output = C[, { 
+      #1st half is 1st outcome's covariance matrix, 2nd half is 2nd outcome's covmat
+      C1 = as.matrix(.SD[ 1:(.N/2) ]) #.SD[ outcome == k[1], !"outcome", with=F ]
+      C2 = as.matrix(.SD[ (.N/2+1):.N ]) #.SD[ outcome == k[2], !"outcome", with=F ]
+      VD = eigen(C1+C2, symmetric=T) #do the eigenvalue decomposition on C1+C2
+      V = VD$vectors #eigenvectors (spatial filters)
+      d = VD$values #eigenvalues (lambda)
+      r = sum(d > 10^-6*d[1]) #estimate rank
+      if ( r < ncol(V) ) {
+        cat( "Data does not have full rank, i.e.",ncol(V)-r+1,"columns are collinear. Computing only",r,"components.\n" )
+      }
+      if (r < 2*npattern) stop( "Too few data columns to calculate", 2*npattern, "filters." )
+      #whiten C1+C2 via matrix P, such that P * (C1+C2) * P' = I
+      P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
+      #diag((P %*%(C1+C2) %*% t(P))) #whitened
+      #whitened spatial covariance matrices (if added together that is):
+      S1 = P %*% C1 %*% t(P) #P * C1 * P' 
+      # S2 = P %*% C2 %*% t(P) #P * C2 * P'
+      #eigenvectors of S1 maximize the variance for class 1 and minimize it for class 2
+      R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
+      #spatial filters:
+      W = t(P) %*% R #W' = R' * P
+      A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
+      #left side maximizes variance under 1st condition and minimizes for 2nd, vice versa on the right
+      filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
+      patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
+      # lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
+      out = cbind(filters, patterns)#, matrix(lambda, nrow=nrow(filters), ncol=length(lambda), byrow=T))
+      lapply(1:ncol(out), function(col) out[,col])
+    }, .SDcols=nmV, by=subject]
+    #set column names of output
+    filtnm = c( paste0("filter",as.character(k[1]),"_",1:npattern), 
+                paste0("filter",as.character(k[2]),"_",npattern:1) )
+    pattnm = sub("filter", "pattern", filtnm)
+    # lambnm = sub("filter", "lambda", filtnm)
+    setnames(output, c("subject", filtnm, pattnm))#, lambnm))
   }
-  #get data into trial format
-  nsamples = data.samplenum(data)
-  target = data[seq(1, nrow(data), nsamples), 2] #2nd col with DV
-  data = data.split_trials(data, strip=T)
-  if ( length(k) == 2 ) { #binary
-    #get trial-averaged Cov-matrix per condition -> C1, C2
-    #ToDo: currently just centered. (x'*X / trace) (Lu et al.)?
-    norm.cov <- function(X) cov(scale(X, scale=F)) #sample covariance (N-1) on centered data
-    if (nsamples > 1) { #compute within trials
-      C1 = Reduce("+", lapply(data[target==k[1]], norm.cov)) / length(data[target==k[1]]) #averaged C
-      C2 = Reduce("+", lapply(data[target==k[2]], norm.cov)) / length(data[target==k[2]]) #averaged C
-      #ToDo: add regularization
-    } else { #compute across trials
-      C1 = norm.cov( plyr::rbind.fill( data[target==k[1]] ) )
-      C2 = norm.cov( plyr::rbind.fill( data[target==k[2]] ) )
-    }
-    #do the eigenvalue decomposeosition on C1+C2
-    VD = eigen(C1+C2, symmetric=T); V = VD$vectors; d = VD$values
-    r = sum(d > 10^-6*d[1]) #estimate rank
-    if ( is.null(list(...)$silent) && r < ncol(V)) { 
-      cat( "Data does not have full rank, i.e.", ncol(V)-r+1 ,
-           "columns are collinear. Computing only",r,"components.\n" )
-    }
-    if (r < 2*npattern) {
-      warning( "Too few data columns to calculate ", 2*npattern, " filters. ",
-               "Computing ", 2*floor(r/2), " instead." )
-      npattern = floor(r/2)
-    }
-    #whiten C1+C2 via matrix P, such that P * (C1+C2) * P' = I
-    P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
-    #diag((P %*%(C1+C2) %*% t(P))) #whitened
-    #whitened spatial covariance matrices (if added together that is):
-    S1 = P %*% C1 %*% t(P) #P * C1 * P' 
-    S2 = P %*% C2 %*% t(P) #P * C2 * P'
-    #eigenvectors of S1 maximize the variance for class 1 and minimize it for class 2
-    R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
-    #spatial filters:
-    W = t(P) %*% R #W' = R' * P
-    A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
-    #obtain the npattern spatial filters: 
-    #left side maximizes variance under 1st condition and minimizes for 2nd, vice versa on the right
-    filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
-    patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
-    lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
-  }
-  output = list(filters=filters, patterns=patterns, lambda=lambda)
-  attr(output, "type") = "CSP"
-  if (!features) return(output) #else...
-  #create CSP features:
-  args.in = .eval_ellipsis("data.project", ...)
-  output$features = do.call(data.project, modifyList( args.in, list(data=data, weights=filters) ))
-  output$outcome = target #add for convenience (directly corresponds to the features)
   return(output)
 }
 

@@ -1,555 +1,300 @@
-## UTILITIES: often needed helper functions
+library(data.table)
+#modifications are done globally; use copy(dt) to make local modifications
+#index a column via character with get(..)
+#prevent dropping of columns by specifying in by: x[ outcome == "A" , lapply(.SD, mean), .SDcols=4:9, by=.(trial, outcome) ]
+#CJ to select multiple values: dat[CJ(1:2, 1:3)]
+#instead of dat[x==1 | y ==3] better to: dat[.(1,3)]
+#select by multiple keys: dat[.(1:5, 5, "B"), nomatch=0]
+#last row: x[.N], second last: x[.N-1]
+#x[,.N] returns the number of rows
+# y[, lapply(.SD, scale), .SDcols = -(1:3) ] #apply scale directly
+# assign: y[, (names(y)[-c(1:3)]) := lapply(.SD, scale), .SDcols = -(1:3) ]
+# scale( y[, .SD, .SDcols = -(1:3) ] ) #get matrix output with attributes
+# insert column-wise: for ( col in 1:ncol(yy) ) set(y, i=NULL, j=colnames(yy)[col], yy[,col])
+# select non-key columns: setdiff(names(x),key(x))
+# DT[c("a","b"),sum(v),by=.EACHI]   # sum for two groups of v
+# DT[,sum(v),by=.(y%%2)]   # by expression
+#get the actual row index: data[, .I[sample %in% baseline] ]
+#data[.(c(1,2,1),c(2,3,5))] subset for subject 1 trial 2 and 5 and for subject 2 trial 3
+#data[.(unique(subject),1)] subset for every subject trial 1
 
-is.datacol <- function(data, tol = .Machine$double.eps^0.5) {
-  ## check if columns of data are measurements (floating numbers)
-  ## used to exclude info columns in a df (e.g. sample number, outcome)
-  if ( is.null(dim(data)) ) data = as.matrix(data)
-  sapply( 1:ncol(data), function(i) {
-    if ( is.numeric( data[,i] ) ) {
-      #are there non-integer values in the column?
-      return( sum( abs( data[,i] - round(data[,i]) ) < tol, na.rm=T ) < nrow(data) ) 
-    }
-    return( FALSE ) #non-numeric
-  })
-}
 
-data.set_type <- function(data) {
-  ## automatic type detection for lists. non-lists are returned without action
-  ## if type is already set, returns immediately
-  ## distinction can be problematic for lists of slices and subjects
-  ## current decision is based on the following criteria:
-  # trial list: 
-  #   - if the unique sample numbers match nrow in the 1st list element
-  # subject list: 
-  #   - if overlapping samples between 1st and 2nd list element correspond to nrow
-  #   - or if the outcome is in non-identical order (highly likely)
-  # slice list: 
-  #   - overlapping samples must be smaller than sample number,
-  #   - outcome should be in identical order between slices
-  ## the outcome is checked as well because sample numbering might vary across
-  ## subject data sets (for whatever reason); in the very unusual scenario
-  ## of an identical outcome order between the 1st and 2nd subject, the list
-  ## will be fasely identified as slices and should instead be set manually
-  ## likewise, a slice list which was created by hand should have constant outcome order
-  ## otherwise it will be falsely identified as subjects
-  if ( any(c("trials", "slices", "subjects") %in% attr(data, "type")) ) {
-    return(data)
-  } else if ( any(c("fold", "folds") %in% attr(data, "type")) ) {
-    stop( "Invalid list type." ) #prevent unwanted behavior
-  }
-  if ( class(data) == "list" ) {
-    if ( class(data[[1]]) == "list" ) { #nested list, perhaps subject data
-      data = lapply( data, data.check, aslist=F )
-    }
-    #get sample number of 1st and 2nd list element
-    nsamples = c( data.samplenum(data[[1]]), data.samplenum(data[[2]]) )
-    if ( identical( nrow(data[[1]]), nsamples[1] ) ) { #trial list
-      #unique sample numbers match row number
-      attr(data, "type") = "trials" 
-    } else { #slice or subject list
-      #if slice list, "overlap" cannot be identical to sample number
-      #because subject data could have non-overlapping sample numbers, 
-      #also check if outcome has the same order in 1st and 2nd element (unlikely for subject data)
-      overlap = sum( unique( data[[1]][,1] ) %in% unique( data[[2]][,1] ) )
-      if ( overlap %in% nsamples || !identical( data[[1]][seq( 1, nrow(data[[1]]), by=nsamples[1] ), 2], 
-                                                data[[2]][seq( 1, nrow(data[[2]]), by=nsamples[2] ), 2] ) ) {
-        attr(data, "type") = "subjects"
-      } else { #slice list
-        attr(data, "type") = "slices"
-      }
-    }
-  }
-  return(data)
-}
-
-data.set_info <- function(data, trials=NULL, outcome=NULL, to.factor=T) {
-  ## function to append required info columns (sample numbers and/or outcome) to raw data
-  ## which only contains measurements (or at least not the required info cols)
+read.data <- function(path=".", pattern="*.csv", nCores=NULL, ...) {
+  ## function to read in data files while also setting the necessary info attributes
   #INPUT ---
-  #data: df or list of trials, slices, subjects
-  #trials: int, if specified sample numbers will be added to 1st col accordingly
-  #outcome: vector with 1 value per trial, if specified will be added to 2nd col
-  #to.factor: if True, outcome is converted to factor (if not already)
-  #NOTES ---
-  #if only one of samples or outcome should be added, leave the other at NULL
-  #for outcome this requires the presence of sample numbers in the 1st col
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    if ( !is.null(outcome) ) {
-      warning( "You are appending identical outcome info to every subject data set in the list." )
-    }
-    data = lapply( data, data.set_info, trials=trials, outcome=outcome )
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  data = data.check(data, aslist=F)
-  if ( !is.null(outcome) ) {
-    if ( !is.null(trials) ) { #trials specified
-      if ( (nrow(data)/trials) %% 1 > 0 ) {
-        stop( "Either your specified trial number is incorrect or your trials differ in length." )
-      }
-      if ( length(outcome) != trials ) {
-        stop( "Length of the outcome must match number of trials." )
-      }
-      outcome = rep( outcome, each=nrow(data)/trials )
-      if ( length(outcome) < nrow(data) ) {
-        stop( "Number of trials does not match the length of the data." )
-      }
-      if (to.factor) outcome = as.factor(outcome)
-      data = cbind(outcome, data, stringsAsFactors=F)
-    } else if ( is.datacol(data[,1]) ) { #sample number is not present in df and no trials specified
-      stop( "No sample numbers found in 1st column and no trials specified.\n", 
-            "Without proper trial info, outcome cannot be appended." )
-    } else { #sample number is present in df
-      nsamples = data.samplenum(data)
-      outcome = rep( outcome, each=nsamples )
-      if ( length(outcome) < nrow(data) ) {
-        stop( "Length of the outcome must match number of trials." )
-      }
-      if (to.factor) outcome = as.factor(outcome)
-      data = cbind(samples=data[,1], outcome, data[,-1], stringsAsFactors=F) #append to 2nd col
-    }
-  }
-  if ( !is.null(trials) ) { #trials specified
-    if ( (nrow(data)/trials) %% 1 > 0 ) {
-      stop( "Either your specified trial number is incorrect or your trials differ in length." )
-    }
-    samples = rep( 1:(nrow(data)/trials), trials )
-    if ( length(samples) < nrow(data) ) {
-      stop( "Number of trials does not match the length of the data." )
-    }
-    data = cbind(samples, data, stringsAsFactors=F)
-  }
-  return( data.check(data, aslist=T, strip=F, transform=.transformed) )
-}
-
-data.samplenum <- function(data) {
-  ## helper function to retrieve sample numbers per trial
-  ## data is expected to have trials of equal length and ordering
-  if ( is.datacol(data[,1]) ) {
-    stop( "It seems your data does not have sample numbers in its first column.\n", 
-          "Please provide that information. Use data.set_info at your convenience." )
-  }
-  samples = unique(data[,1]); nsamples = length(samples)
-  if ( !isTRUE(all.equal( rep( samples, nrow(data)/nsamples ), data[,1] )) ) {
-    stop( "Perhaps your first column does not contain sample numbers.\n",
-          "Other possible causes may be that the order of your sample numbers varies,\n", 
-          "or your trials are not of equal length. Please meet these assumptions." )
-  }
-  return( nsamples )
-}
-
-data.check <- function(data, aslist=T, strip=F, transform=T) {
-  ## check data format and return designated type
-  #INPUT ---
-  #data: df, matrix or list
-  #aslist: True = return as list, False = df
-  #strip: remove non-data (measurement) columns, see is.datacol
-  #transform: used to return to original data format using .transformed
+  #path: string specifying the location (folder) with the data files
+  #pattern: pattern common to all data files, e.g. the file ending
+  #nCores: number of CPU cores to use for parallelization
+  #        if NULL, automatic selection; if 1, sequential execution
+  #        if an empty list, an externally registered cluster will be used
+  #...: further arguments to fread and to data.setinfo
+  #     important arguments are 'samples' (which has to be constant for all data sets) 
+  #     and 'outcome' which can only be specified as an integer that indicates the column
+  #     with the outcome values for each data file. If no such column is present you can
+  #     specify NULL and add the outcome afterwards by looping the sets.
   #RETURNS ---
-  #data 
-  #.transformed: bool in parent environment indicating if data was .transformed (True) or not (False)
-  if (!transform) { #used if function is called with .transformed but no previous transformation happend
-    suppressWarnings( rm(.transformed, pos=1) ) #remove from parent environment
-    return(data)
-  } 
-  .transformed <<- FALSE
-  data = data.set_type(data) #set the list type if necessary
-  if (aslist) {
-    if ( class(data) != "list" ) { #if not a list
-      .transformed <<- TRUE
-      return( data.split_trials(data, strip=strip) ) #transform to trial list 
-    }
-    if ( strip ) { #even if a list strip non-data cols
-      #FIX: possible misidentification in cases with only 1 sample per trial
-      #obtain datacol info with higher sample number by rebinding temporarily
-      datacols = is.datacol( as.data.frame( data.table::rbindlist(data) ) )
-      return( lapply( data, function(d) d[, datacols] ) )
-    }
-    return(data) #already a list
-  } #else... 
-  if ( class(data) == "list" ) { #if a list...
-    #find out if trial list or slice list:
-    if ( "trials" %in% attr(data, "type") ) {
-      .transformed <<- TRUE #retransform notice only if it was a trial list
-      data = data.table::rbindlist(data) #transform list to df
-    } else if ( "slices" %in% attr(data, "type") ) {
-      data = .data.unslice(data)
-    } else if ( "subjects" %in% attr(data, "type") ) {
-      stop( "Loop the individual data sets of your subject data list for this function." )
+  #data.table with info columns, accepted by all functions (if outcome was not NULL)
+  .eval_package(c("foreach","data.table"), load=T)
+  args = .eval_ellipsis(c("data.setinfo", "fread"), ...)
+  if ( identical(args$fread$dec, .eval_ellipsis("fread")$fread$dec) ) {
+    args$fread$dec = "." #do.call on fread may fail due to default of 'dec'
+  }
+  files = list.files(path=path, pattern=pattern, full.names=T)
+  cluster = parBackend(cores=nCores, required=length(files)) #parallelize read in
+  outlen = ifelse(length(files) > 100, length(files), 100) #for .maxcombine argument of foreach
+  data = foreach(f=files, .combine = list, .multicombine = T, .maxcombine=outlen) %dopar%
+  {
+    d = do.call(fread, modifyList(args$fread, list(input=f)) ) #read file
+    do.call( data.setinfo, modifyList(args$data.setinfo, list(data=d)) ) #set info attributes
+  }
+  parBackend(cores=cluster) #shut down cluster (if created by inside call)
+  if ( length(files) > 1 ) { #list of multiple subjects
+    if ( all(sapply(data, function(d) d[, unique(subject)]) == 0L) ) { #subject info was not set
+      data = rbindlist(lapply(data, function(d) d[, subject:=NULL]), idcol="subject", use.names=T)
     } else {
-      stop( "Invalid or undefined list type." )
+      data = rbindlist(data, use.names=T)
     }
   }
-  #df, dt or matrix/vector to df
-  data = as.data.frame(data)
-  if (strip) return( data[, is.datacol(data)] )
-  return(data)  
+  return(data.check(data)[])
 }
 
-data.split_trials <- function(data, strip=F) {
-  ## transform data into a list of trials according to sample numbering (1st col)
-  ## returns a list of dfs with each element corresponding to a single trial
-  ## sets the attribute "type" to "trials"
-  #INPUT ---
-  #strip: non-numeric columns are stripped (e.g. sample numbers, outcome)
-  
-  ## make sure data is a df 
-  # can't call data.check because it might interfere with .transformed of previous call!
-  data = data.set_type(data)
-  if ( "trials" %in% attr(data, "type") ) return(data)
-  if ( "slices" %in% attr(data, "type") ) {
-    data = .data.unslice(data)
-  } else if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.split_trials, strip=strip) #iterate the subjects
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  data = as.data.frame(data) #in case of matrix
-  ##
-  nsamples = data.samplenum(data) #1st col with sample info required
-  trials = findInterval(1:nrow(data), seq(1, nrow(data), by=nsamples))  
-  if (strip) {
-    trialdata = split(data[, is.datacol(data)], trials)
-  } else {
-    trialdata = split(data, trials)
-  }
-  attr(trialdata, "type") = "trials"
-  return( trialdata )
-}
+is.float <- function(x) if (is.numeric(x)) any(x %% 1 > 0) else FALSE
 
-data.split_slices <- function(data, window, overlap=0, idx.out=F) {
-  ## group consecutive data points according to the specified window size into separate slices
-  ## i.e. data points from different trials but same time intervals are grouped together 
-  ## does several control checks to prevent unwanted results
-  #INPUT ---
-  #data: continuous df or list of trials, subjects
-  #window: number of samples per slice
-  #overlap: >= 0 number of overlapping samples per slice, i.e. to have a sliding time window
-  #idx.out: if False, data is split. Else, only indices to split with are returned
-  #       "trial.idx" and "slice.idx" which can be used on trial data like this:
-  #        trial[ trial.idx[ slice.idx == 1 ], ] #to get trial samples for the first slice
-  #        loop: lapply(data, function(trial) trial[ trial.idx[slice.idx==1] ,])
-  #        or to split the full trial: split( trial[trial.idx,], slice.idx )
-  #RETURNS ---
-  #a list of which the elements correspond to the number of slices
-  #within each list element is a df with the grouped samples across different trials
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.split_slices, window=window, overlap=overlap, idx.out=idx.out )
-    if (!idx.out)  attr(data, "type") = "subjects"
-    return(data)
+data.setinfo <- function(data, .outcome=NULL, .subject=NULL, .samples=NULL, .trials=NULL, strip=F, asFactor=T) {
+  #outcome: character or number specifying a column, or vector corresponding to trial number or vector corresponding to nrow
+  #subject: character or integer specifying a column, or numeric (non-integer) specifying the subject id
+  #samples: character or integer specifying a column, or numeric (non-integer) specifying the number of samples per trial
+  #trials: character or integer specifying a column, or numeric (non-integer) specifying the number of samples per trial
+  #strip: logical, if True, non-floating number columns (excluding the info columns) are removed from data
+  data = as.data.table(data) #create a copy
+  #begin by checking for non-NULL input:
+  if ( is.character(.subject) || is.integer(.subject) ) { #supplied as column name/number
+    setnames(data, .subject, "subject") #change column name to subject
+  } else if ( is.numeric(.subject) ) { #supplied as id
+    data[, subject := .subject] #add id as column
   }
-  data = data.check(data, aslist=F) #transform to df
-  nsamples = data.samplenum(data)
-  if ( window >= nsamples ) {
-    stop( "Window must be smaller than the number of samples per trial." )
+  if ( is.character(.samples) || is.integer(.samples) ) { #supplied as column name/number
+    setnames(data, .samples, "sample") #change column name to sample
+  } else if ( is.numeric(.samples) ) { #supplied as quantity
+    if (is.null(.trials)) cat( "Non-integer input to .samples detected:", .samples, "samples assigned to each of", nrow(data)/.samples, "trials.\n" )
+    data[, sample := rep(1:.samples, times=.N/.samples)] #repeat for each trial
   }
-  #check if overlap makes sense:
-  if ( overlap >= window ) {
-    stop( "Overlap must be smaller than window or you can't slide across the data." )
+  if ( is.character(.trials) || is.integer(.trials) ) { #supplied as column name/number
+    setnames(data, .trials, "trial") #change column name to trial
+  } else if ( is.numeric(.trials) ) { #supplied as quantity
+    if (is.null(.samples)) cat( "Non-integer input to .trials detected:", .trials, "trials extended for", nrow(data)/.trials, "samples each.\n" )
+    data[, trial := rep(1:.trials, each=.N/.trials)] #repeat for number of samples
   }
-  if (overlap < 1) { #create simple time bins without overlap
-    #check if slices will be of equal length:
-    frac = (nsamples/window) %% 1
-    if ( frac > 0) {
-      cat( "Slices are not of equal length. Last slice contains only ", 
-           round(frac*100), "% of the samples relative to the other slices.\n", sep="" )
-    }    
-    #slice for a single trial:
-    slice = findInterval(1:nsamples, c(seq(1, nsamples, by=window), Inf))
-    if (!idx.out) {
-      slicedata = split(data, slice) #slice is recycled over the df
-      attr(slicedata, "type") = "slices"
-      return( slicedata )
+  if ( length(.outcome) == 1 ) { #supplied as column name/number
+    setnames(data, .outcome, "outcome")  #change column name to outcome
+  } else if ( length(.outcome) == nrow(data) ) { #supplied as separate column (vector)
+    data[, outcome := .outcome] #add column to data
+  }
+  #check if all columns are set:
+  check = c("sample","trial","outcome","subject") %in% names(data)
+  if ( !check[4] ) data[, subject := 0L] #placeholder
+  if ( !all(check[1:3]) ) { #in case at least one is not set...
+    #case 0|0|0
+    if ( all(!check[1:3]) ) { #if none are set only outcome was supplied as vector with 1 value per trial
+      .samples = nrow(data)/length(.outcome) #each outcome value corresponds to a single trial
+      data[, ':=' ( trial = rep(1:(.N/.samples), each=.samples), 
+                    sample = rep(1:.samples, times=.N/.samples), 
+                    outcome = rep(.outcome, each=.samples)) ]
+    #case 1|x|x
+    } else if (check[1]) { #samples are set
+      if (!check[2]) data[, trial := rep(1:(.N/uniqueN(sample)), each=uniqueN(sample)) ] #case 1|0|x, trials not set
+      if (!check[3]) data[, outcome := rep(.outcome, each=uniqueN(sample)) ] #case 1|x|0, outcome not set
+    #case 0|1|x
+    } else if (check[2]) { #trials are set
+      data[, sample := 1:.N, by=.(subject,trial)] #samples not set
+      if (!check[3]) data[, outcome := .outcome[.GRP], by=.(subject,trial)] #case 0|1|0, outcome not set
+    #case 0|0|1
+    } else { #only outcome is set
+      #estimate sample/trial number via minimum consecutive occurence of an outcome value (not fail-proof)
+      .samples = data[, min(rle(as.character(outcome))$lengths)] #problematic in block designs or small data sets
+      cat( "Estimating the sample number via minimum consecutive occurence of an outcome to be:", .samples, "\n" )
+      data[, ':=' ( trial = rep(1:(.N/.samples), each=.samples), sample = rep(1:.samples, times=.N/.samples) ) ]
     }
-    return( list(trial.idx=1:nsamples, slice.idx=slice) ) #indices per trial
   }
-  #sliding window (with overlap):
-  startidx = seq(1, nsamples-1, by=window-overlap) #get sequence of start indices for the slices
-  endidx = seq(window, nsamples, by=window-overlap) #get sequence of end indices for the slices
-  imbalance = length(startidx)-length(endidx)
-  endidx = c(endidx, rep( nsamples, imbalance )) #append nsamples as many times as needed
-  #sliding time window intervals:
-  slide = unlist( mapply( seq, startidx, endidx ) ) #single trial sample indices
-  trialnum = nrow(data)/nsamples #number of trials
-  #slide indices for whole df:
-  slides = rep(slide, trialnum) + #repeat slide for all trials and add...
-    rep( nsamples, trialnum*length(slide) ) * #the max sample number (repeated for all samples and trials) ...
-    rep( 0:(trialnum-1), each=length(slide) ) #multiplied by the trial position (0:N-1)
-  splitidx = rep( 1:length(startidx), c( rep( window, length(startidx)-imbalance ), #intervals to split with
-                                         nsamples+1-rev(rev(startidx)[0:imbalance]) ) ) #correct for imbalance in last slide(s), if any
-  if (imbalance) {
-    cat( "Sliding Window: Your last", imbalance, "slice(s) contain(s)", 
-         "less samples than the previous", length(endidx)-imbalance, "slices.\n" )    
+  if (asFactor) data[, outcome := ordered(outcome)]
+  data = data.check(data) #sets key and sorts columns
+  if (strip) { #remove non-float, non-info columns
+    measurements = sapply( names(data)[-(1:4)], function(n) is.float(data[[n]]) )
+    remove = which(!measurements)+4
+    for ( n in names(data)[remove] ) set(data, j=n, value=NULL)
   }
-  if (!idx.out) {
-    temp = data[slides,] #create a new df with updated length due to overlap
-    slicedata = split(temp, splitidx)
-    attr(slicedata, "type") = "slices"
-    return( slicedata )
-  }
-  return( list(trial.idx=slides[slides<=nsamples], slice.idx=splitidx) ) #indices per trial
+  return(data[])
 }
 
-.data.unslice <- function(data) {
-  ## unslice data that has been sliced (output as df)
-  window = sapply( data, function(d) length( unique(d[,1]) ) )
-  overlap = sum( unique( data[[1]][,1] ) %in% unique( data[[2]][,1] ) )
-  slicelens = sapply( data, nrow )
-  trialnum = slicelens[1]/window[1]
-  fullidx = sum( window >= window[1] )
-  
-  unsliceidx = c( rep( rep(T, window[1]), trialnum ), #everything from 1st slice
-                  #take the non-overlapping samples of all following "full" slices
-                  rep( rep( c( rep(F, overlap), rep(T, window[1]-overlap) ), trialnum ), fullidx-1 ) )
-  #in case of imbalance:
-  if ( fullidx < length(data) ) {
-    unsliceidx = c( unsliceidx, 
-                    #add first imbalanced slice with different window size
-                    rep( c( rep(F, overlap), rep(T, window[fullidx+1]-overlap) ), trialnum ) )
-  }
-  data = as.data.frame( data.table::rbindlist(data) )
-  if ( nrow(data) > length(unsliceidx) ) {
-    #concatenate FALSE for the rest of the slices if there were more
-    unsliceidx = c( unsliceidx, rep( F, nrow(data)-length(unsliceidx) ) )
-  }
-  #now subset to get back original data:
-  data = data[unsliceidx,]
-  #regroup samples in the correct order corresponding to the trials
-  trialsplit = c( rep(1:trialnum, each=window[1]), #first slice full window
-                  rep( rep(1:trialnum, each=window[1]-overlap), fullidx-1 )) #other slices non-overlapping samples
-  if ( fullidx < length(window) ) {
-    #add last (imbalanced) slice samples:
-    trialsplit = c( trialsplit, rep(1:trialnum, each=window[fullidx+1]-overlap) )
-  }
-  #now get trial data format:
-  data = split(data, trialsplit)
-  data = as.data.frame( data.table::rbindlist(data), row.names=NULL)
-  attr(data, "window") = unname(window[1])
-  attr(data, "overlap") = overlap
-  return(data)
+data.check <- function(data) {
+  ## checks the data set for presence of info columns, column ordering and keys
+  cn = c("subject", "trial", "sample", "outcome")
+  if ( is.data.table(data) && all(cn %in% key(data)) ) return(data) #everything OK
+  #else...
+  if ( !all(cn %in% names(data)) ) stop( "Info columns missing. Please refer to data.setinfo." )
+  if ( !is.data.table(data) ) data = as.data.table(data) #if not a data table
+  if ( !all(cn %in% key(data)) ) setkeyv(data, cn) #if keys are not set
+  if ( !identical(names(data)[1:length(cn)], cn) ) setcolorder( data, union(cn, names(data)) ) #order columns
+  return(data) #no copy if it was a DT
 }
 
-data.normalize <- function(data, start=NULL, end=NULL, scale=F) {
-  ## remove the mean of a range of data points from the other samples of a trial
-  ## generally used to subtract the average of a baseline period, i.e. 1:baseline_end
-  #INPUT ---
-  #data: continuous df or list of trials, returns data in the same format
-  #start: first sample of the range to subtract, defaults to first sample of the trial
-  #end: last sample of the range, defaults to last sample of the trial
-  #scale: if True, data is both centered and scaled, otherwise only centered
-  data = data.check(data, aslist=T, strip=F) #transform to list
-  if ( "slices" %in% attr(data, "type") ) {
-    data = data.split_trials( data, strip=F )
-    .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.normalize, start=start, end=end, scale=scale)
-    attr(data, "type") = "subjects"
-    return(data)
+data.normalize <- function(data, baseline, scale=F, copy=F) {
+  #baseline: vector with sample numbers that represent baseline or single number setting endpoint of baseline
+  #scale: perform scaling in addition to centering
+  #copy: modify DT directly or create a copy. non-DT input will be copied necessarily
+  if (copy) data = copy(data)
+  data = data.check(data)
+  if ( data[, uniqueN(sample)] <= 1 ) stop( "Normalization requires at least 2 samples per trial. ")
+  if (length(baseline) == 1) baseline = 1:baseline
+  vec.norm <- function(x, idx, scale) {
+    x = x-mean(x[idx]) #subtract baseline mean from whole vector
+    if (scale) x = x/sd(x[idx]) #divide whole vector by baseline sd
+    return(x)
   }
-  nsamples = data.samplenum(data[[1]])
-  if ( is.null(start) || start < 1 ) start = 1
-  if ( is.null(end) || end > nsamples ) end = nsamples
-  dcol = is.datacol(data[[1]])
-  normdata = lapply(data, function(trial) {
-    normalized = scale(trial[start:end, dcol], scale=scale)
-    if ( !identical(end, nsamples) ) {
-      #normalize only via a baseline
-      if (scale) {
-        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
-                     attr(normalized,"scaled:center"), attr(normalized,"scaled:scale"))
-      } else {
-        temp = scale(trial[ c( 0:(start-1), (end+1):nrow(trial) ), dcol], 
-                     attr(normalized,"scaled:center"), scale=F)
-      }
-      normalized =  rbind( temp[0:(start-1), , drop=F], #pre-baseline samples
-                           normalized, #baseline samples
-                           temp[start:nrow(temp), , drop=F] ) #post-baseline samples
-    }
-    setNames( data.frame( trial[, !dcol], normalized ), names(trial) ) #return to lapply
-  })
-  return( data.check(normdata, aslist=F, transform=.transformed) ) #transform back to df if needed
+  nm = setdiff( names(data), key(data) )
+  equal = data[, .N, by=sample][, uniqueN(N) == 1] #identical distribution for all samples
+  if (equal) { #generalize index of first subject/trial to all (fast)
+    idx = data[.(subject[1],trial[1]), sample %in% baseline] 
+    data[, (nm) := lapply(.SD, vec.norm, idx=idx, scale=scale), .SDcols=nm, by=.(subject,trial) ]
+  } else { #individual indices for every subject/trial, accessed via .I (slow, better way?)
+    idxDT = data[, .(idx=sample %in% baseline), by=.(subject,trial)] #index for every subject/trial
+    data[, (nm) := lapply(.SD, vec.norm, idx=idxDT[.I,idx], scale=scale), .SDcols=nm, by=.(subject,trial) ]
+  }
+  return(data[]) #points to same DT-object if no copying performed
 }
 
-data.remove_samples <- function(data, start=1, end, relabel=T) {
-  ## remove datapoints from trials, specified by sample number (1st col)
-  ## can be used e.g. to remove a baseline before analysis
-  #INPUT ---
-  #data: continuous df or list of trials, slices, subjects
-  #start: first sample to remove, defaults to first sample of the trial
-  #end: last sample to remove (end of the range to remove)
-  #start and end correspond to positions and not to the actual values in the column
-  #relabel: if True, adapts 1st col to the new sample number (from 1:last sample)
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.remove_samples, start=start, end=end, relabel=relabel )
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  data = data.check(data, aslist=F) #transform to df
-  nsamples = data.samplenum(data)
-  if ( nsamples <= 1 ) stop( "Only 1 sample per trial found." )
-  if ( nsamples < end ) {
-    warning( "The specified end exceeds the sample numbers. ",
-             "Setting end to the last sample." )
-    end = nsamples
-  }
-  trialnum = nrow(data)/nsamples
-  #create idx in case sample numbering is discontinuous
-  sampleidx = rep( 1:nsamples, trialnum )
-  data = data[sampleidx<start | sampleidx>end,] #remove range
-  if (relabel) { #fix sample numbers to be continuous again
-    data[,1] = rep(1:( nsamples-end+start-1 ), trialnum) 
-  }
-  return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
+data.subset_samples <- function(data, select, invert=F, update=T) {
+  #select: samples to select or remove if invert = T
+  #update: if TRUE, relabel samples to go from 1:N after subsetting
+  data = data.check(data)
+  if (length(select) == 1) select = 1:select
+  data = data[ if (invert) !sample %in% select else sample %in% select ]
+  if (update) data[, sample := seq_len(.N), by=.(subject,trial)] #count samples from 1:N
+  return( data.check(data)[] )
 }
 
-data.remove_classes <- function(data, labels, col=2) {
-  ## function to reduce the outcome factor to fewer levels
-  ## subset multiclass data into binary data according to specified labels for 1 vs 1 classification
-  #INPUT ---
-  #data: continuous df or list of trials, slices, subjects
-  #labels: multi element vector corresponding to the class labels you wish to retain
-  #col: column with the outcome (class labels), defaults to 2nd column
-  #RETURNS ---
-  #a subset of the original data with only the specified class labels
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.remove_classes, labels=labels, col=col )
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  data = data.check(data, aslist=F) #transform to df
-  #subset data according to specified labels:
-  data = data[ data[,col] %in% labels, ]
-  #in case the outcome was a factor:
-  try( data[,col] <- droplevels(data[,col]), silent=T ) 
-  return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
+data.subset_classes <- function(data, classes) {
+  #classes: vector specifying the outcome values to subset
+  data = data.check(data)
+  if ( data[, is.factor(outcome)] ) classes = as.character(classes)
+  #subset and drop factor levels if applicable
+  return( data.check(data[ outcome %in% classes ][, outcome := if (is.factor(outcome)) ordered(outcome) else outcome ])[] )
 }
 
-data.merge_classes <- function(data, labels, new_labels=NULL, col=2, verbose=T) {
-  ## function to collapse specified factor labels
-  ## preferable choice over data.remove_classes if you want to keep all samples 
-  ## and some factor levels are more similar than others
-  #INPUT ---
-  #data: continuous df or list of trials, slices, subjects
-  #labels: multi element vector or list with multi-element vectors
-  #        corresponding to the class labels you wish to merge,
-  #        e.g. c(1,2) changes the labels to 1
-  #        e.g. list( c(1,2), c(3,4) ) changes labels to 1 and 3 (4 labels->2 labels)
-  #new_labels: a vector defining new labels 
-  #col: column with the outcome (class labels), defaults to 2nd column
-  #verbose: print information about collapsed levels and new names
-  #RETURNS ---
-  #data of the same size with reduced number of class labels
-  #note: label 0 will be avoided as a label for the merged classes
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply( data, data.merge_classes, labels=labels, new_labels=new_labels, col=col, verbose=verbose )
-    attr(data, "type") = "subjects"
-    return(data)
+data.merge_classes <- function(data, classes, new.labels=NULL, copy=F) {
+  #classes: vector specifying the outcome values to merge or list of vectors for multiple merges
+  #         e.g. c("A","B") to merge the outcomes A and B;
+  #         e.g. list(c("A","B"),c("C","D")) to merge A and B, and also C and D
+  #new.labels: optional vector specifying the new label(s) for the merged class(es)
+  #            each position of the vector corresponds to the respective merge
+  #            e.g. classes = c("A","B") and new.labels = "C" would merge A and B to C
+  #            e.g. list(c("A","B"),c("C","D")) and new.labels = c("E","F") merges A and B to E; and C and D to F
+  #copy: modify DT directly or create a copy. non-DT input will be copied necessarily
+  if (copy) data = copy(data)
+  data = data.check(data)
+  if (!is.list(classes)) classes = list(classes)
+  if ( data[, is.factor(outcome)] ) classes = lapply(classes, as.character)
+  for (i in seq_along(classes)) {
+    data[ outcome %in% classes[[i]], outcome := if (is.null(new.labels[i])) classes[[i]][1] else new.labels[i] ]
   }
-  data = data.check(data, aslist=F) #transform to df
-  outcome = data[,col]
-  if ( !is.list(labels) ) { labels = list(labels) }
-  allLabs = do.call(c, labels ) #all specified labels
-  if ( length( unique(allLabs) ) < length(allLabs) ) {
-    stop( "Don't specify labels multiple times. This will likely lead to unintended results." )
-  }  
-  temp = as.character(outcome)
-  for ( i in seq_along(labels) ) {
-    lab = labels[[i]]
-    if ( !is.null(new_labels) && i <= length(labels) ) {
-      newlab = new_labels[i]
-    } else {
-      newlab = lab[1]
-    }
-    temp[ outcome %in% lab ] = newlab
-    if (verbose) cat("Merged classes", paste(as.character(lab),collapse=" & "), "to", newlab,"\n")
-  }
-  #change labels in data
-  data[, col] = as.factor(temp)
-  try( data[,col] <- droplevels(data[,col]), silent=T )
-  return( data.check(data, aslist=T, strip=F, transform=.transformed) ) #transform to list if needed
-}  
+  if ( data[, is.factor(outcome)] ) data[, outcome := ordered(outcome)] #drop levels
+  return( data.check(data)[] )
+}
 
 data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, plot=F) {
-  ## remove trials that are classified as outliers based on variance
-  ## the variance is computed within each trial for each channel,
-  ## then the channel variances are averaged, yielding one value per trial
-  ## finally the trials with global values that exceed the threshold are excluded
-  ## the threshold is defined as: Q + C * IQR
-  #INPUT:
-  #data: df or list of trials, slices, subjects
-  #threshold: variance threshold above which trials are considered as outliers. 
-  #           If NULL, automatic threshold calculation via parameters
-  #Q, IQR, C: threshold parameters for automatic threshold calculation
-  #plot: if True, diagnostic plot is printed which plots the trial variance and the
-  #      threshold (red dashed line). Removed trials are marked with their trial number
-  #RETURNS:
-  #data without the outliers,
-  #has the attributes: threshold, removed (trials), variance (1 value per trial)
-  data = data.set_type(data)
-  if ( "slices" %in% attr(data, "type") ) {
-    trialdata = data.split_trials( data, strip=T )
-    .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) {
-    data = lapply(data, data.remove_outliers, Q=Q, IQR=IQR, C=C, plot=plot)
-    attr(data, "type") = "subjects"
-    return(data)
-  } else { #trial list or df
-    trialdata = data.check(data, aslist=T, strip=T)  
-  }
-  # compute global variance values
-  trialvar = colMeans( sapply( trialdata, function(trial) apply(trial, 2, var, na.rm=T) ) )
-  if ( is.null(threshold) ) { # define threshold
-    if ( any( findInterval( c(Q,IQR), c(0,100) ) != 1 ) ) {
-      stop( "Q and IQR have to be in the range 0 to 100." )
-    }
+  #detect outlier trials based on variance criterion, i.e. trial's whose averaged channel-wise variance
+  #exceeds a threshold are removed from the data. threshold formula: Q+C*IQR
+  #threshold: can be manually set and thus fixed for all subjects
+  #Q represents a quantile of the trial variance values, e.g. Q=50=median
+  #IQR represents a range between two quantiles of the variance, i.e. IQR=90=range between 5% and 95% quantiles
+  #C is a constant that multiplies the inter-quantile range
+  #plot: if True, variance, thresholds and outliers are plotted per subject
+  #returns data with a summary attribute which lists the number of outliers, thresholds and median variance per subject
+  data = data.check(data)
+  nm = setdiff( names(data), key(data) )
+  #compute global variance values
+  trialvar = data[, { chvar = sapply(.SD, var, na.rm=T); .(trialvar = mean(chvar)) }, .SDcols=nm, by=.(subject,trial)]
+  if ( is.null(threshold) ) { #define threshold via automatic criterion
+    if ( any( findInterval( c(Q,IQR), c(0,100) ) != 1 ) ) stop( "Q and IQR have to be in the range 0 to 100." )
     IQR = c( 0+(100-IQR)/200, 1-(100-IQR)/200 ) #convert IQR values to 0-1 range
-    lims = quantile( trialvar, probs=c(Q/100, IQR), na.rm=T ) #get threshold values
-    threshold = unname( lims[1] + C * (lims[3]-lims[2]) )
+    thresholds = trialvar[, { #calculate thresholds per subject based on global variance values
+      lims = quantile(trialvar, probs=c(Q/100, IQR), na.rm=T);
+      .(threshold = lims[1] + C * (lims[3]-lims[2])) #formula: Q + C * IQR
+      }, by=subject]
+  } else { #create a DT with fixed (user defined) threshold value for every subject
+    thresholds = data[, .(threshold = threshold), by=subject]
   }
-  outliers = which( unname(trialvar > threshold) ) #find trials that exceed global variance threshold
-  cat( "Removed ", length(outliers), " outliers (",
-       round(length(outliers)/length(trialvar)*100, 2), "% of trials).\n", sep="" )
-  if (plot) {
-    #visualize the outliers
-    ylims = c( min( min(trialvar), threshold ), max( max(trialvar), threshold ) )
-    plot(trialvar, xlab="Trial", ylab="Variance", las=1, ylim = ylims)
-    abline(h = threshold, col="red", lty=2)
-    if ( length(outliers) > 0 ) {
-      outlier_labels = rep("", length(trialvar))
-      outlier_labels[outliers] = as.character(outliers)
-      text(trialvar, labels=outlier_labels, cex=.7, pos=4)  
+  #determine outlier trials which exceed the threshold
+  outlier = trialvar[thresholds][, .(outlier = trialvar > threshold), by=.(subject,trial)]
+  cat( outlier[outlier==T, .N], "outlier trials detected.\n" )
+  if (plot) { #visualize the outliers
+    summary = trialvar[thresholds][outlier] #join the DTs
+    for (s in thresholds[, subject]) { #iterate through subjects and plot the distribution, threshold and highlight outliers
+      summary[subject == s, { plot( trialvar, xlab="Trial", ylab="Variance", las=1, ylim = c(0,max(trialvar,threshold[1])) );
+        abline(h=threshold[1], col="red", lty=2); 
+        text(trialvar, labels=ifelse(outlier,as.character(trial),""), cex=.7, pos=4) }]
     }
   }
-  # return data without the outlier trials + info as attributes
-  data = data.split_trials(data, strip=F) #get trialdata with info columns
-  if ( length(outliers) < 1 ) { #no outliers
-    outliers = 0
-    data = data.check( data, aslist=F, transform=.transformed )
-  } else { #remove outliers
-    data = data.check( data[-outliers], aslist=F, transform=.transformed )
-  }
-  attr(data, "removed") = outliers
-  attr(data, "threshold") = threshold
-  attr(data, "variance") = trialvar
-  return(data)
+  #subset non-outlier trials
+  data = data[outlier][outlier==F]
+  summary = outlier[outlier==T,.(outliers=.N),by=subject][thresholds][trialvar[, .(median.var=median(trialvar)), by=subject]]
+  return( setattr( data.check(data[, outlier:=NULL]), "summary", summary[is.na(outliers), outliers:=0] )[] )
 }
 
+slice.idx <- function(n, window, overlap=0, imbalance="ignore") {
+  #n: number of samples per trial or vector specifying min/max sample number
+  #window: number of samples per slice that are contributed by each trial
+  #overlap: >= 0 number of overlapping samples per slice, i.e. to have a sliding time window
+  #         an overlap of 0 results in simple binning of the sample sequence where each slice
+  #         contains new samples (i.e. none were part of the previous slice);
+  #         any other number specifies how many of the next slice's samples were present in the previous one  
+  #imabalance: a character specifying what happens when the slice parameters don't exactly match n;
+  #            discard: remove samples, i.e. drop last slice, 
+  #            adjust: increase overlap for the last slice to have same window size,
+  #            ignore: last slice has fewer samples (i.e. smaller window) but same overlap
+  #RETURNS: a matrix where column = slice number, rows = slice samples
+  #NOTE: subset with data[ sample %in% slice.idx[,slicenumber] ]
+  min.n = ifelse(length(n) > 1, min(n), 1)
+  max.n = max(n)
+  if ( window > max.n-min.n+1 ) stop( "Window must be smaller or equal the number of slices." )
+  if ( overlap >= window ) stop( "Overlap must be smaller than window." )
+  else if (overlap < 0) overlap = 0
+  imbalance = tolower(imbalance)
+  start = seq(min.n, 1+max.n-window, by=window-overlap)
+  end = seq(min.n+window-1, max.n, by=window-overlap)
+  idx = mapply(seq, start, end) 
+  #ensure idx is a matrix and not a vector when window = 1
+  if ( !is.matrix(idx) ) idx = matrix(idx, nrow=window, byrow=T)
+  #check if parameters add up
+  miss = max.n-end[length(end)]
+  if (miss) { #not all samples were included
+    if ( !imbalance %in% c("ignore","discard","adjust") ) stop( "Undefined method to handle imbalance." )
+    if ( imbalance == "discard" ) { #do nothing (excludes the samples from the output)
+      cat( "Last", miss, paste0("sample", ifelse(miss > 1, "s", "")), "are discarded.\n" )
+    } else if ( imbalance == "ignore" ) { #add slice with smaller window and same overlap
+      fix = (end[length(end)]-overlap+1):max.n
+      idx = cbind(idx, c( fix, rep(NA, window-length(fix)) )) #add missing as NA
+      cat( "Last slice is", window-length(fix), paste0("sample", ifelse(window-length(fix) > 1, "s", "")), "shorter.\n" )
+    } else if ( imbalance == "adjust" ) { #increase window to keep overlap constant
+      idx = cbind(idx, (max.n-window+1):max.n)
+      o = sum( idx[, ncol(idx)-1] %in% idx[, ncol(idx)] ) - overlap
+      cat( "Last slice's overlap is increased by", o, paste0("sample", ifelse(o > 1, "s", ""), "."),"\n" )
+    }
+  }
+  return(idx) 
+}
 
-simulate.data <- function(outcomes=2, n.channels=60, n.trials=50, n.samples=100, SNR=.5,
-                          srate=50, amplitudes=NULL, frequencies=NULL, space=NULL, time=NULL) {
+data.simulate <- function(n.subjects=1, n.outcomes=2, n.channels=60, n.trials=50, n.samples=100, SNR=.5,
+                          sample.rate=50, amplitudes=NULL, frequencies=NULL, space=NULL, time=NULL) {
   ## create simulated data in typical EEG format
   #INPUT ---
-  #outcomes: number of outcomes, i.e. signals in the data
+  #n.subjects: number of times to repeat the data generation (simulating a subject each)
+  #n.outcomes: number of outcomes, i.e. signals in the data
   #n.channels: number of measurement columns (e.g. EEG electrodes)
   #n.trials: number of trials per outcome
   #n.samples: number of samples per trial
   #SNR: signal to noise ratio, a value between 0 and 1
-  #srate: sampling rate (n.samples per second)
+  #sample.rate: sampling rate (n.samples per second)
   #amplitudes: a vector specifying the signal amplitude for each outcome 
   #            if NULL, a random number between 1 and 5 per outcome
   #frequencies: a vector with 2 values per outcome specifying the frequency band
@@ -559,105 +304,139 @@ simulate.data <- function(outcomes=2, n.channels=60, n.trials=50, n.samples=100,
   #       if NULL, random channel range is chosen per outcome
   #time: a vector with 2 values per outcome for the on- and offset of the signals within a trial
   #RETURNS ---
-  #a data frame with outcome and sample info + specified number of channels
-  #attributes for amplitudes, frequencies, space and time are added
+  #data table with attribute "properties" of the mixed signals
   .eval_package("signal")
   if ( SNR < 0 || SNR > 1 ) stop( "The signal-to-noise ratio (SNR) takes a value between 0 and 1." )
-  if ( any( !(c(2*length(amplitudes), length(frequencies), length(space), length(time))/outcomes) %in% c(0,2) ) ) {
+  if ( any( !(c(2*length(amplitudes), length(frequencies), length(space), length(time))/n.outcomes) %in% c(0,2) ) ) {
     stop( "Signal properties need to be specified for each outcome individually." )
+  }
+  if (n.subjects>1) {
+    args.in = lapply(as.list(match.call())[-1], eval); args.in$n.subjects=1
+    data = replicate(n.subjects, {
+      dat = do.call(data.simulate, args.in)
+      dat[, subject:=NULL] 
+    }, simplify=F)
+    props = rbindlist(lapply(data, attr, "properties"), idcol="subject", use.names=T)
+    data = rbindlist(data, idcol="subject", use.names=T)
+    return( data.check( setattr(data, "properties", props) ) )
   }
   #set defaults: every outcome gets some attribute on the dimensions time, space, spectrum
   if ( is.null(amplitudes) ) { #randomply pick a sd
-    amplitudes = sample(1:5, size=outcomes, replace=T)
+    amplitudes = sample(1:5, size=n.outcomes, replace=T)
   }
   if ( is.null(frequencies) ) { #randomly pick a spectrum
-    frequencies = sample(2:round(srate/4), size=outcomes, replace=T)
-    frequencies = matrix( c(frequencies, frequencies + 1), ncol=outcomes, byrow=T )
+    frequencies = sample(2:round(sample.rate/4), size=n.outcomes, replace=T)
+    frequencies = matrix( c(frequencies, frequencies + 1), ncol=n.outcomes, byrow=T )
   }
-  frequencies = matrix(frequencies, ncol=outcomes) #1 column per outcome
+  frequencies = matrix(frequencies, ncol=n.outcomes) #1 column per outcome
   if ( is.null(space) ) { #spatial distribution of the signal
-    space = matrix( c( sample(1:round(n.channels/2), size=outcomes, replace=T),
-                       sample(round(n.channels/2+1):n.channels, size=outcomes, replace=T) ), ncol=outcomes, byrow=T )
+    space = matrix( c( sample(1:ceiling(n.channels/2), size=n.outcomes, replace=T),
+                       sample(floor(n.channels/2+1):n.channels, size=n.outcomes, replace=T) ), ncol=n.outcomes, byrow=T )
   }
-  space = matrix(space, ncol=outcomes) #1 column per outcome
+  space = matrix(space, ncol=n.outcomes) #1 column per outcome
   if (is.null(time) ) { #define on- and offset of signal
-    time = matrix( c( sample(1:round(n.samples/4), size=outcomes, replace=T),
-                      sample(round(3*n.samples/4+1):n.samples, size=outcomes, replace=T) ), ncol=outcomes, byrow=T )
+    time = matrix( c( sample(1:ceiling(n.samples/4), size=n.outcomes, replace=T),
+                      sample(floor(3*n.samples/4+1):n.samples, size=n.outcomes, replace=T) ), ncol=n.outcomes, byrow=T )
   }
-  time = matrix(time, ncol=outcomes) #1 column per outcome
+  time = matrix(time, ncol=n.outcomes) #1 column per outcome
   
-  #create signals from gaussian noise by applying a bandpass butter filter
-  signals = sapply( seq_len(outcomes), function(s) {
-    bt = signal::butter(n=5,W=c(frequencies[1,s]/srate*2, frequencies[2,s]/srate*2), type="pass")
+  #create oscillatory signals from gaussian noise by applying a bandpass butter filter
+  signals = sapply( seq_len(n.outcomes), function(s) {
+    bt = signal::butter(n=5,W=c(frequencies[1,s]/sample.rate*2, frequencies[2,s]/sample.rate*2), type="pass")
     tmp = rnorm(n=n.samples, sd=amplitudes[s])
     x = signal::filtfilt(bt, tmp[ time[1,s]:time[2,s] ])
     c( rep(0, time[1,s]-1), x, rep(0, n.samples-time[2,s]) ) #append 0 before/after
   })
+  if (!is.matrix(signals)) signals = matrix(signals, nrow=n.samples)
   #create smooth random source patterns
-  patterns = matrix(rnorm(n.channels*outcomes), nrow=n.channels)
-  patterns = apply( patterns, 2, signal::filtfilt, filt=signal::Ma(b=c(1,1)) )
+  patterns = matrix(rnorm(n.channels*n.outcomes), nrow=n.channels)
+  patterns = apply( patterns, 2, signal::filtfilt, filt=signal::Ma(b=c(1,1)) ) #moving average filter
   #create prototype trials for each outcome
-  trials = lapply( seq_len(outcomes), function(s) {
+  trials = lapply( seq_len(n.outcomes), function(s) {
     X = signals[, s] %*% t(patterns[ space[1,s]:space[2,s], s])
     #append 0 columns to align dimensions between mixed signals
     cbind( matrix(0, nrow=n.samples, ncol=space[1,s]-1), X, 
            matrix(0, nrow=n.samples, ncol=n.channels-space[2,s]) )
   })
   #create all trials
-  data = lapply(trials, function(trial) {
+  data = do.call(rbind, lapply(trials, function(trial) {
     #repeat the prototypical trial n times
     d = matrix( rep( t(trial), n.trials), ncol=n.channels, byrow=T )
     #create sensor noise
     noise = matrix(rnorm(n.trials*n.samples*n.channels), nrow=n.trials*n.samples, ncol=n.channels)
     #add them together
     SNR * d + (1-SNR) * noise
-  })
-  #add sample num and outcome info
-  data = lapply( seq_len(outcomes), function(s) {
-    data.set_info(data[[s]], trials=n.trials, outcome=rep(LETTERS[s], n.trials), to.factor=F) 
-  })
-  #bind together and shuffle order
-  tmp = do.call( c, data.split_trials(data) )
-  data = data.check( tmp[ sample(1:length(tmp)) ], aslist=F )
-  data$outcome = factor(data$outcome, levels=LETTERS[1:outcomes])
-  #set column names
-  names(data)[3:ncol(data)] = paste0("channel",seq_len(n.channels))
-  #set attributes
-  attr(data, "amplitudes") = amplitudes
-  attr(data, "frequencies") = as.vector(frequencies)
-  attr(data, "space") = as.vector(space)
-  attr(data, "time") = as.vector(time)
-  return(data)
+  }) )
+  #generate outcome
+  shuffleidx = sample(1:(n.outcomes*n.trials))
+  outcome = rep(LETTERS[1:n.outcomes], each=n.trials)[shuffleidx]
+  #split and bind in the order set by shuffleidx
+  data = data.table::rbindlist( split( as.data.frame(data), rep(1:(n.outcomes*n.trials), each=n.samples) )[shuffleidx] )
+  setnames( data, paste0("channel",seq_len(n.channels)) )
+  data = data.setinfo(data, .outcome=outcome, .samples=n.samples, .trials=n.outcomes*n.trials)
+  #add data generation information as attributes and return
+  props = data.table(outcome = LETTERS[1:n.outcomes], amplitude=amplitudes, lower.freq=frequencies[1,], upper.freq=frequencies[2,],
+                     channel.onset=space[1,], channel.offset=space[2,], time.onset=time[1,], time.offset=time[2,])
+  return( setattr(data, "properties", props)[] )
 }
 
-.unnest <- function(L) {
-  ## recursively check list length and remove nesting if length == 1
-  if ( class(L) == "list" ) {
-    L = lapply(L, .unnest) #go further down
-    if ( length(L) <= 1 ) return( L[[1]] ) #remove nesting
-  } else {
-    return(L) #keep non-list element
+parBackend <- function(cores=NULL, ...) {
+  ## initialize or shut down a parallel backend
+  #cores: numeric specifying the number of cores to initiate for parallel backend; NULL defaults to available cores;
+  #       or a cluster object to shut down; or an empty list to take no action (to leave a cluster active)
+  #...: pass the argument 'required' to specify number of jobs (internally used by functions)
+  #RETURNS: the cluster object (list) or nothing (if shut down) or passes the empty list without action
+  if ( !is.list(cores) ) { #initialize a backend
+    .eval_package("foreach", load=T)
+    start.time = proc.time()[3] #includes time spent on initialization of the cluster
+    cores = min( min( cores, parallel::detectCores() ), list(...)$required ) #sanity check user input 
+    #start up the CPU cluster
+    cluster = parallel::makeCluster(cores) #create
+    doParallel::registerDoParallel(cluster) #register
+    #TEMP export functions to cluster
+    parallel::clusterEvalQ( cluster, expr={ source("decode.R"); require(data.table) } )
+    cat( "Distributing", list(...)$required, "jobs to", cores, "workers . . .\n" )
+    return( setattr(cluster,"start.time",start.time) ) #return the cluster with time attribute
+  } else if ( length(cores) > 0 && getDoParRegistered() ) { #active cluster to shut down
+    parallel::stopCluster(cores)
+    #remove cluster from foreach environment (otherwise throws error with no new backend)
+    env = foreach:::.foreachGlobals 
+    rm(list=ls(name=env), pos=env) #getDoParRegistered() evaluates to FALSE again
+    invisible(gc()) #clean-up after computation
+    if ( !is.null(attr(cores,"start.time")) ) {
+      cat( "Done. Time elapsed (mins):", round((proc.time()[3]-attr(cores,"start.time"))/60,2), "\n" )
+    }
+  } else { #take no action (leave cluster active)
+    if ( is.null(attr(cores,"start.time")) ) {
+      cat( "Distributing", list(...)$required, "jobs to", foreach::getDoParWorkers(), "workers . . .\n" )
+      return( setattr(cores,"start.time",proc.time()[3]) )
+    } else {
+      cat( "Done. Time elapsed (mins):", round((proc.time()[3]-attr(cores,"start.time"))/60,2), "\n" )
+    }
   }
-  return(L) #return L with more than 1 element
 }
+
+
+#### private functions ####
 
 .eval_ellipsis <- function(funStr, ...) {
   ## helper to evaluate input to ellipsis (...) before handing it to a function
-  require(utils, quietly=T)
-  args.in = list(...)
-  fun.args = formals( funStr ) #function arguments
-  use.args = modifyList(fun.args, args.in, keep.null=T) #overwrite matching arguments 
-  use.args = use.args[ names(use.args) %in% names(fun.args) ] #use only legal arguments
-  return( use.args )
+  args.in = list(...) #input
+  args.out = list() #output
+  for (FUN in funStr) {
+    fun.args = formals(FUN) #function arguments  
+    use.args = modifyList(fun.args, args.in, keep.null=T) #overwrite matching arguments 
+    use.args = use.args[ names(use.args) %in% names(fun.args) ] #use only legal arguments
+    args.out[[FUN]] = use.args
+  }
+  return(args.out)
 }
 
 .eval_package <- function(pkgStrings, load=F) {
   ## helper to check if package(s) are present
   for (pkgStr in pkgStrings) {
-    #check if pkg exists
-    if ( requireNamespace(pkgStr, quietly=T) ) { 
-    } else { 
-      #install pkg if not present
+    if ( requireNamespace(pkgStr, quietly=T) ) { #check if pkg exists
+    } else { #install pkg if not present
       install.packages(pkgStr)
     }
     if (load) { #attach pkg
@@ -666,69 +445,7 @@ simulate.data <- function(outcomes=2, n.channels=60, n.trials=50, n.samples=100,
   }
 }
 
-.parallel_backend <- function(on = T, CPUcluster = NULL, nCores = NULL) {
-  ## function to start or end parallel backend
-  if (on) {
-    .eval_package( c("parallel", "doParallel") )
-    if (is.null(nCores)) nCores = parallel::detectCores()
-    CPUcluster = parallel::makeCluster(nCores)
-    doParallel::registerDoParallel(CPUcluster)
-    return( CPUcluster )
-  } else {
-    parallel::stopCluster(CPUcluster)
-    #unregister foreach variable scope
-    env = foreach:::.foreachGlobals
-    rm(list=ls(name=env), pos=env) 
-    invisible( gc() )
-  }
-}
 
-.parallel_check <- function(required=NULL, nCores=NULL, output=NULL) {
-  ## helper function to determine if a parallel backend is already running,
-  ## if one should be initiated, or if the user requested a sequential backend
-  #INPUT:
-  #required: maximum number of required cores, 
-  #          e.g. number of subjects to parallelize over, i.e. length(data)
-  #nCores: user input to nCores. If NULL, automatic selection of cores
-  #        between maximum required and available cores
-  #        can be an empty list to use a registered backend
-  #output: previously generated output by this function to shut off backend (if necessary)
-  #RETURNS:
-  #if output is NULL, an output list with CPUcluster and nCores is generated
-  #in a sequential backend, CPUcluster will be an empty list
-  .eval_package("foreach", load=T) #parallelize for subject list
-  if ( is.null(output) ) {
-    output = list( CPUcluster = list(), outside = F, start.time = proc.time()[3] )
-    if ( is.list(nCores) && getDoParRegistered() ) { #cluster input
-      output$CPUcluster = nCores
-      output$nCores = getDoParWorkers() 
-      output$outside = T #cluster was created outside and will not be shut down
-    } else if ( !is.null(nCores) && (length(nCores) == 0 || nCores <= 1 )) { #no parallelization
-      registerDoSEQ() #sequential backend for foreach
-      output$nCores = 1
-    } else {
-      if ( is.null(nCores) ) { #default to as many cores as available/required
-        output$nCores = min( parallel::detectCores(), required )
-      } else { #nCores was set by user
-        #sanity check user input: only as many cores as available/required
-        output$nCores = min( min( nCores, parallel::detectCores() ), required )
-      } 
-      output$CPUcluster = .parallel_backend(on=T, nCores=output$nCores) #initiate cores
-    }
-    #TEMP: export functions to clusters
-    if ( length(output$CPUcluster) > 0 ) {
-      parallel::clusterEvalQ( output$CPUcluster, expr={ source("decode.R") } )
-    }
-    cat( "Distributing", required, "jobs to", output$nCores, "workers . . .\n" )
-    return(output) #list with CPUcluster and nCores
-  } else if ( !output$outside ) { #if cluster was created by function call...
-    if ( length(output$CPUcluster) == 0 && output$nCores == 1 ) { 
-      #remove sequential backend
-      env = foreach:::.foreachGlobals
-      rm(list=ls(name=env), pos=env) 
-    } else if ( length(output$CPUcluster) > 0 ) {
-      .parallel_backend(on=F, output$CPUcluster) #shut down cores
-    } #else externally created cluster which is left as is
-  }
-  cat( "Done. Time elapsed (mins):", round((proc.time()[3]-output$start.time)/60,2), "\n" )
-}
+
+
+
