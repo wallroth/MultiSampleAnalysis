@@ -154,7 +154,7 @@ data.normalize <- function(data, baseline, scale=F, copy=F) {
   nm = setdiff( names(data), key(data) )
   equal = data[, .N, by=sample][, uniqueN(N) == 1] #identical distribution for all samples
   if (equal) { #generalize index of first subject/trial to all (fast)
-    idx = data[.(subject[1],trial[1]), sample %in% baseline] 
+    idx = data[.(subject[1],trial[1],baseline), which=T]
     data[, (nm) := lapply(.SD, vec.norm, idx=idx, scale=scale), .SDcols=nm, by=.(subject,trial) ]
   } else { #individual indices for every subject/trial, accessed via .I (slow, better way?)
     idxDT = data[, .(idx=sample %in% baseline), by=.(subject,trial)] #index for every subject/trial
@@ -201,13 +201,14 @@ data.merge_classes <- function(data, classes, new.labels=NULL, copy=F) {
   return( data.check(data)[] )
 }
 
-data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, plot=F) {
+data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, min.var=0, plot=F) {
   #detect outlier trials based on variance criterion, i.e. trial's whose averaged channel-wise variance
   #exceeds a threshold are removed from the data. threshold formula: Q+C*IQR
   #threshold: can be manually set and thus fixed for all subjects
   #Q represents a quantile of the trial variance values, e.g. Q=50=median
   #IQR represents a range between two quantiles of the variance, i.e. IQR=90=range between 5% and 95% quantiles
   #C is a constant that multiplies the inter-quantile range
+  #min.var: minimum variance a trial has to exceed before it is considered as outlier
   #plot: if True, variance, thresholds and outliers are plotted per subject
   #returns data with a summary attribute which lists the number of outliers, thresholds and median variance per subject
   data = data.check(data)
@@ -225,14 +226,18 @@ data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, plot=F
     thresholds = data[, .(threshold = threshold), by=subject]
   }
   #determine outlier trials which exceed the threshold
-  outlier = trialvar[thresholds][, .(outlier = trialvar > threshold), by=.(subject,trial)]
+  outlier = trialvar[thresholds][, .(outlier = trialvar > max(threshold, min.var)), by=.(subject,trial)]
   cat( outlier[outlier==T, .N], "outlier trials detected.\n" )
   if (plot) { #visualize the outliers
     summary = trialvar[thresholds][outlier] #join the DTs
     for (s in thresholds[, subject]) { #iterate through subjects and plot the distribution, threshold and highlight outliers
-      summary[subject == s, { plot( trialvar, xlab="Trial", ylab="Variance", las=1, ylim = c(0,max(trialvar,threshold[1])) );
-        abline(h=threshold[1], col="red", lty=2); 
-        text(trialvar, labels=ifelse(outlier,as.character(trial),""), cex=.7, pos=4) }]
+      summary[subject == s, { 
+        plot( trialvar, xlab="Trial", ylab="Variance", las=1, ylim = c(0,max(trialvar,threshold[1],min.var)) )
+        abline(h=threshold[1], col="red", lty=2)
+        if (min.var > 0) abline(h=min.var, col="blue", lty=2)
+        text(trialvar, labels=ifelse(outlier,as.character(trial),""), cex=.7, pos=4)
+        text(x=0, y=max(trialvar,threshold[1],min.var), labels=paste0("S",s))
+        }]
     }
   }
   #subset non-outlier trials
