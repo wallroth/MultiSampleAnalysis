@@ -21,7 +21,7 @@ data.project <- function(data, filters, approx=T, logscale=T) {
     lapply(1:length(weights), function(f) {
       if (approx) {
         feat = var(features[,f]) #component variance
-        ifelse(logscale, ifelse(feat > 0, log(feat), -60), feat) #replace -Inf with -60 (~ 10^-27)
+        ifelse(logscale, log(feat), feat) #will generate -Inf if 0 variance
       } else {
         features[,f]
       }
@@ -30,7 +30,7 @@ data.project <- function(data, filters, approx=T, logscale=T) {
   return( data.check(projection[, sample := if (approx) 1 else data[, sample] ])[] ) #add back sample info
 }
 
-decompose.CSP <- function(data, npattern=3) {
+decompose.CSP <- function(data, npattern=3, shrinkage=F, average=F) {
   ## Common spatial pattern algorithm, cf. Lemm et al. 2005, Blankertz et al. 2008
   ## CSP paradigm: create spatial filters (weights) which can be used
   ## to extract signals of interest (via projection) from the data measurements
@@ -40,18 +40,24 @@ decompose.CSP <- function(data, npattern=3) {
   # -> if too low the features may not contain sufficient information for the classifiers
   # -> if too high, risk of overfitting
   #NOTE: if outcome is not binary, one vs. the rest approach is taken
-  #ToDo: currently just centered. (x'*X / trace) (Lu et al.)?
+  #ToDo: - currently just centered. (x'*X / trace) (Lu et al.)?
+  #      - center before cov? trial averaged C? (compare wyrm)
   data = data.check(data)
-  args.in = lapply( as.list(match.call())[-c(1,2)], eval )
   k = data[, sort(unique(outcome))] #check outcome and sort (otherwise its order will conform to the first appearance in data)
   if ( length(k) > 2 ) { #one vs. the rest (OVR)
     cat( "More than two classes; switching to one-vs-rest CSP for multi-class solution.\n" )
     OVR = lapply(seq_along(k), function(i) { #collapse all other classes to one level ("rest")
       decompose.CSP(data=data.merge_classes(data, classes=k[!k %in% k[i]], new.labels=paste0("REST",i), copy=T), npattern=npattern)
     })
-    for (i in 2:length(OVR)) set(OVR[[i]], j="subject", value=NULL) #remove duplicate subject columns
-    output = do.call(cbind, OVR) #column bind the per class OVR results
-  } else if ( length(k) == 2 ) { #binary
+    for (i in 2:length(OVR)) { #remove duplicate subject columns before cbinding
+      set(OVR[[i]], j="subject", value=NULL) 
+      set(attr(OVR[[i]], "lambda"), j="subject", value=NULL)
+    }
+    #column bind the per class OVR results
+    lambda = do.call(cbind, lapply(OVR, attr, "lambda"))
+    output = do.call(cbind, OVR) 
+    setattr(output, "lambda", lambda) #add back attribute
+  } else { #binary
     nm = setdiff( names(data), key(data) )
     nmV = paste0("V",1:length(nm)) #overwritten column names after computation of C
     #get trial-averaged Cov-matrix per condition
@@ -64,20 +70,20 @@ decompose.CSP <- function(data, npattern=3) {
         lapply(.SD, mean) }, .SDcols=nmV, by=.(subject,outcome,.idx)] #averaged covariance matrix per outcome/subject
     } else { #only 1 sample per trial: compute across trials
       C = data[, { 
-        mat = as.matrix(.SD) #plug into matrix format first (this conversion is the bottleneck)
+        mat = as.matrix(.SD)
         C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(nm), byrow=T ) )
         lapply(1:length(nm), function(ch) C[,ch])
       }, .SDcols=nm, by=.(subject,outcome)]
     }
     setkeyv(C, c("subject","outcome")) #sort for outcome
     output = C[, { 
-      #1st half is 1st outcome's covariance matrix, 2nd half is 2nd outcome's covmat
+      #1st half of C is 1st outcome's covariance matrix, 2nd half is 2nd outcome's covmat
       C1 = as.matrix(.SD[ 1:(.N/2) ]) #.SD[ outcome == k[1], !"outcome", with=F ]
       C2 = as.matrix(.SD[ (.N/2+1):.N ]) #.SD[ outcome == k[2], !"outcome", with=F ]
-      VD = eigen(C1+C2, symmetric=T) #do the eigenvalue decomposition on C1+C2
+      VD = eigen(C1+C2, symmetric=T) #do ordinary eigenvalue decomposition on C1+C2
       V = VD$vectors #eigenvectors (spatial filters)
-      d = VD$values #eigenvalues (lambda)
-      r = sum(d > 10^-6*d[1]) #estimate rank
+      d = VD$values #eigenvalues (lambda, component variance)
+      r = sum(d > 10^-6*d[1]) #estimate rank of data matrix, reduce if necessary
       if ( r < ncol(V) ) {
         cat( "Data does not have full rank, i.e.",ncol(V)-r+1,"columns are collinear. Computing only",r,"components.\n" )
       }
@@ -86,70 +92,47 @@ decompose.CSP <- function(data, npattern=3) {
       P = diag(d[1:r]^-0.5) %*% t(V[,1:r]) #note: called M in the SSD implementation
       #diag((P %*%(C1+C2) %*% t(P))) #whitened
       #whitened spatial covariance matrices (if added together that is):
-      S1 = P %*% C1 %*% t(P) #P * C1 * P' 
-      # S2 = P %*% C2 %*% t(P) #P * C2 * P'
-      #eigenvectors of S1 maximize the variance for class 1 and minimize it for class 2
-      R = eigen(S1)$vectors #S1 = R * D * R' #R = B in Lu et al.
-      #spatial filters:
-      W = t(P) %*% R #W' = R' * P
+      S1 = P %*% C1 %*% t(P) #S1 = R * D * R' #R = B in Lu et al.
+      #now another ordinary EVD instead of generalized EVD [geigen(C1, C1+C2) or geigen(C1-C2, C1+C2)]
+      R = eigen(S1, symmetric=T)$vectors #eigen sorts already from large to small eigenvalues
+      #transform spatial filters back to un-whitened space:
+      W = t(P) %*% R #W' = R' * P  #W is equivalent at this point to vectors of generalized EVD
+      #scale components to unit variance (SPoC) # which C to use?? (C1+C2)/2 ?
+      # W = sapply(1:ncol(W), function(i) W[,i]/sqrt(RD$values[i])) ??
+      # W = apply(W, 2, function(w) w/sqrt(t(w)%*%C1%*%w)) #equivalent to above
       A = C1 %*% W  %*% solve((t(W) %*% C1 %*% W), tol=10^-30) #pattern matrix
+#       #normalize projection matrix (Lu et al): ??
+#       W = apply(W, 2, function(w) w/sqrt(sum(w^2))) #by 2-norm (euclidian distance for vectors)
       #left side maximizes variance under 1st condition and minimizes for 2nd, vice versa on the right
       filters = W[,c(1:npattern, (ncol(W)-npattern+1):ncol(W))] #first n and last n cols
       patterns = A[,c(1:npattern, (ncol(A)-npattern+1):ncol(A))] #for visualization
-      # lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
-      out = cbind(filters, patterns)#, matrix(lambda, nrow=nrow(filters), ncol=length(lambda), byrow=T))
+      lambda = d[c(1:npattern, (length(d)-npattern+1):length(d))] #to estimate correlation
+      out = cbind(filters, patterns, matrix(lambda, nrow=nrow(filters), ncol=length(lambda), byrow=T))
       lapply(1:ncol(out), function(col) out[,col])
     }, .SDcols=nmV, by=subject]
     #set column names of output
     filtnm = c( paste0("filter",as.character(k[1]),"_",1:npattern), 
                 paste0("filter",as.character(k[2]),"_",npattern:1) )
     pattnm = sub("filter", "pattern", filtnm)
-    # lambnm = sub("filter", "lambda", filtnm)
-    setnames(output, c("subject", filtnm, pattnm))#, lambnm))
+    lambnm = sub("filter", "lambda", filtnm)
+    setnames( output, c("subject", filtnm, pattnm, lambnm) )
+    setattr( output, "lambda", output[, .SD[1], .SDcols=lambnm, by=subject] )
+    output[, (lambnm) := NULL]
   }
-  return(output)
+  return(output[])
 }
 
-decompose.SPoC <- function(data, npattern=3, baseline=NULL, features=T, nCores=NULL, ...) {
+decompose.SPoC <- function(data, npattern=3, shrinkage=F) {
   ## Source Power Correlation Analysis, cf. Dähne et al. 2014
   ## supervised learning approach that takes the DV into account
   ## analogous to CSP but with continuous outcome
   ## general idea: find a spatial filter that extracts an oscillatory signal whose
   ## power correlates with a given (continuous) target variable
   #INPUT ---
-  #data: df or list of trials, slices, subjects
   #npattern: the first/last n SPoC filters to use for feature generation
-  #baseline: define last sample of baseline (if any) so that it will be excluded 
-  #          for the SPoC procedure. If Null, no samples are removed.  
-  #features: if T, features are computed and returned
-  #nCores: if data is a subject list, number of CPU cores to use for parallelization
-  #        if NULL, automatic selection; if 1, sequential execution
-  #        if an empty list, an externally registered cluster will be used
   #NOTE: outcome should be numeric, otherwise it will be converted to numbers
-  #RETURNS ---
-  #filters: spatial filters, demixing matrix W
-  #patterns: activation patterns, mixing matrix A
-  #lambda: eigenvalues (lambda) of SPoC components, the power correlations
-  #features: trial-wise (log)variance of SPoC-components
-  #outcome: as supplied (in numeric form), format as 1 value per trial
-  data = data.set_type(data)
-  if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
-    pcheck = .parallel_check(required=length(data), nCores=nCores)
-    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
-    SPoCresult = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
-      do.call(decompose.SPoC, utils::modifyList( list(data=d, npattern=npattern, 
-                            baseline=baseline, features=features), list(...) ))
-    .parallel_check(output=pcheck)
-    SPoCresult = setNames( SPoCresult, paste0("subject", seq_along(data)) )
-    attr(SPoCresult, "type") = "subjects"
-    return(SPoCresult)
-  }
-  data = data.check(data, aslist=F)
-  if ( !is.null(baseline) ) { #remove baseline for SPoC procedure
-    data = data.remove_samples(data, end=baseline)
-  }
-  nsamples = data.samplenum(data)
-  outcome = data[seq( 1, nrow(data), by=nsamples ), 2]
+  data = data.check(data)
+  
   if ( !is.numeric(outcome) ) {
     warning( "Converting outcome to be numeric." )
     outcome = suppressWarnings( as.numeric(outcome) ) #suppress warnings in case of NAs
