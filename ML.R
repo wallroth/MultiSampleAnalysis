@@ -18,6 +18,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   #permutations: number of permutations on each fold, corresponds to the number
   #              of true fits, i.e. a value of 1 means as many permutations as there 
   #              are true fits; 2 means twice as many, etc.; 0 = no permutations
+  #CV: output from fold.idx to control the cross validation scheme
   #nCores: number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
@@ -27,7 +28,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   "%in%" <- function(x, table) fmatch(x, table, nomatch = 0) > 0 #overwrite match with fmatch
   method = tolower(method); decompose = toupper(decompose)
   if ( !method %in% c("within","across","between") ) stop( "Undefined decoding method. Options are 'within', 'across' and 'between'." )
-  if ( !decompose %in% c("NONE","CSP","SPECCSP","SPOC") ) stop( "Undefined decomposition method. Options are 'CSP', 'SpecCSP' and 'SPoC'." )
+  if ( !decompose %in% c("NONE","CSP","SPOC") ) stop( "Undefined decomposition method. Options are 'CSP' and 'SPoC'." )
   if ( !is.null(CV) && repetitions > 0 ) {
     cat( "Ignoring the requested number of repetitions because a predefined CV scheme is supplied.\n" )
     repetitions = 0
@@ -35,7 +36,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   data = data.check(data)
   #retrieve arguments for various functions later down the line (exclude function name and data from evaluation)
   args.in = lapply( as.list(match.call())[-c(1,2)], eval ) #eval input before foreach in case variable names were passed
-  args = do.call( .eval_ellipsis, modifyList(args.in, list(funStr=c("fold.idx","slice.idx","data.permute_classes","data.project","model.fit"))) )
+  args = do.call( .eval_ellipsis, modifyList(args.in, list(funStr=c("fold.idx","slice.idx","data.permute_classes","model.fit"))) )
   args$pass = args.in[ !names(args.in) %in% c( names(formals(decode)), do.call(c, lapply(args, names)) ) ] #additional arguments
   ## evaluate model specification once to reduce overhead from multiple model.fit calls ##
   models = c("Reg", "LogReg", "SVM", "LDA", "SDA") #currently implemented models
@@ -45,7 +46,8 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   }
   args$model.fit[c("center","scale")] = lapply(args$model.fit[c("center","scale")], eval) #evaluate logicals
   nm = setdiff( names(data), key(data) )
-  if (args$model.fit$model != "REG") { #classification
+  args$classification = args$model.fit$model != "REG"
+  if (args$classification) {
     .eval_package("pROC")
     args$model.fit$multiClass = data[, uniqueN(outcome) > 2]
     if (!is.ordered(data$outcome)) setkeyv( data[, outcome:=ordered(outcome)], setdiff(names(data), nm) )
@@ -65,7 +67,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     .eval_package("sda")
     funargs = modifyList( as.list(formals(sda::sda)), list(verbose=F) )
   }
-  args$model.fit$fitfun = modifyList( funargs, args$pass[ names(args$pass) %in% names(funargs) ], keep.null=T )
+  args$model.fit$fitfun = modifyList( funargs, args$pass[ match(names(args$pass), names(funargs), nomatch=0)>0 ], keep.null=T )
   ## end model evaluation ##
   if ( method == "between" && is.null(CV) ) args$fold.idx$fold.type = "subjects"
   else if ( method == "across" && is.null(args$fold.idx$n.folds) && is.null(CV) ) { #LOO: minimum occurence across subjects
@@ -85,31 +87,46 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     test.allow = ifelse( is.null(args.in$allow.identical) && is.null(args$fold.idx$n.folds) &&
          (is.null(CV) || CV[, .(N=uniqueN(trial)), by=.(subject,fold)][, min(N) <= 2]), T, train.allow )
   }
-  args$DECOMPOSE = decompose != "NONE"
+  args = args[!names(args) %in% c("pass","data.permute_classes")] #no longer needed
   args$within = method == "within"
-  if (args$DECOMPOSE) { #a decomposition method is set
-    args$data.project[c("approx","logscale")] = lapply(args$data.project[c("approx","logscale")], eval) #evaluate logicals
-    args$data.project$npattern = ifelse(is.null(args.in$npattern), 3, args.in$npattern)
-    args$data.project$nm = nm
-    args$data.project$nmV = paste0("V",1:length(nm))
-    args$DECOMPOSE.method = paste0("decompose.", grep(decompose, c("CSP","SpecCSP","SPoC"), ignore.case=T, value=T)[1])
-    if ( args$data.project$approx && args$slice.idx$window == 1 ) {
-      cat( "With a window size of 1 approximation of trial variance is not possible; setting to FALSE.\n" )
-      args$data.project$approx = F
-    }
-    if ( args$data.project$approx && args$data.project$logscale && is.null(args.in$scale) ) {
-      cat( "Deactivating scaling via SD because log-transformation of trial variance is set.\n" )
-      args$model.fit$scale = F
-    }
-  }
   if ( nchar(args$slice.idx$window) > 0 ) { #get slice indices
     allequal = data[, .N, by=.(subject,trial)][, all(diff(N) == 0)] #do all trials have the same number of samples
     if (!allequal) stop( "Assumption of non-varying sample numbering across subjects is violated." )
     minmax = data[c(1,.N), sample] #get first/last sample number (sorted = min/max)
-    slices = do.call( slice.idx, modifyList(args$slice.idx, list(n=minmax)) ) #one slice setting is applied to all subjects
+    #one slice setting is applied to all subjects, no deviation in last slice tolerated for programmatic reasons
+    slices = do.call( slice.idx, modifyList(args$slice.idx, list(n=minmax, imbalance="discard")) )
   } else { #no slicing, every sample is used
     if (GAT) stop( "Data must be sliced for GAT. Please define a window size, cf. slice.idx" )
     slices = matrix( data[, unique(sample)], ncol=1 )
+    args$slice.idx$window = nrow(slices)
+  }
+  args$decompose = decompose != "NONE"
+  if (args$decompose) { #a decomposition method is set: retrieve arguments und verify legitimacy of input
+    decompose.method = paste0("decompose.", grep(decompose, c("CSP","SPoC"), ignore.case=T, value=T)[1])
+    tmp = do.call( .eval_ellipsis, modifyList(args.in, list(funStr=c(decompose.method,"data.project"))) )
+    args$decomp = lapply(c(tmp[[decompose.method]][-1], tmp$data.project[-c(1,2)]), eval) #evaluate non-empty arguments
+    if (args$decomp$shrinkage) .eval_package("corpcor")
+    args$decomp$CSP = decompose == "CSP"
+    if ( !args$classification && args$decomp$CSP ) stop( "CSP requires a classification problem." )
+    if ( !args$decomp$CSP && args$slice.idx$window == 1 ) {
+      stop( "SPoC requires more than 1 sample per trial to compute the within-trial covariance." )
+    }
+    if ( args$decomp$approx && args$slice.idx$window == 1 ) {
+      cat( "At a window size of 1 computing the trial variance is not possible; setting approx to FALSE.\n" )
+      args$decomp$approx = F
+    }
+    if ( args$decomp$approx && args$decomp$logscale && is.null(args.in$scale) ) {
+      cat( "Deactivating scaling via SD because log-transformation of trial variance is set.\n" )
+      args$model.fit$scale = F
+    }
+    if ( args$classification && args$decomp$CSP ) { #class details not required for SPoC
+      args$decomp$multiClass = args$model.fit$multiClass
+      args$decomp$classes = levels(data$outcome)
+    }
+    if ( args$slice.idx$window == 2 && args$decomp$shrinkage && args$decomp$average ) {
+      cat( "Ignoring shrinkage: when averaging at a window size of 2, median and mean are identical.\n" )
+      args$decomp$shrinkage = F
+    }
   }
   repetitions = repetitions + 1 #a single run equals 1 'repetition'
   dataMat = unname( as.matrix(data[, .SD, .SDcols=nm]) ) #transform data to matrix (measurements only)
@@ -124,17 +141,17 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   
   ## fit function for a single slice ##
   fit.slice <- function(slice) {
-#     if (args$DECOMPOSE) {
-#       features = .DECOMPOSE(train.slice, test.slice, args=args$data.project)
-#       test.slice = features[ setkeyv(test.slice[, .(trial=unique(trial)), by=subject], c("subject","trial")) ]
-#       train.slice = features[!test.slice]
-#       if (nrow(train.slice) == 0) train.slice = test.slice #no CV
-#     }
     if (!args$within) { #collapse data across/between subjects
+      if (args$decompose) {
+        slice = .DECOMPOSE(slice, trialidx, args$decomp)
+      }
       return( setDT(.PREDICT(.FIT(slice$train, cvoutcome$train.outcome, args$model.fit),
                              slice$test, cvoutcome$test.outcome, args$model.fit)) )
     } else { #slice is nested for subjects to keep subject data separate
       perfs = lapply(seq_along(testIDs), function(sub) {
+        if (args$decompose) {
+          slice[[sub]] = .DECOMPOSE(slice[[sub]], trialidx[[sub]], args$decomp)
+        }
         .PREDICT(.FIT(slice[[sub]]$train, cvoutcome[[sub]]$train.outcome, args$model.fit),
                  slice[[sub]]$test, cvoutcome[[sub]]$test.outcome, args$model.fit)
       })
@@ -156,9 +173,43 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
       })) )
     }
   }
-  
+  ## helper functions to reduce code repetition inside fitting loop ##
+  get.outcome <- function(outcome, idx) { #save outcome (invariant across slices)
+    GET <- function(outcome, i) {
+      return( list(train.outcome = outcome[ i[i %in% trainIdx] ],
+                   test.outcome = outcome[ i[i %in% testIdx] ]) )
+    }
+    if (args$within) return( lapply(idx[posIDs], function(i) GET(outcome, i)) )
+    return( GET(outcome, idx) ) #else: across/between
+  }
+  if (args$decompose) {
+    get.trialidx <- function(y) { #save indices (order is invariant across slices)
+      GET <- function(y) {
+        from = seq(1, length(y$train.outcome), args$slice.idx$window)
+        trialidx = list(train = matrix(mapply(seq, from, from+args$slice.idx$window-1), nrow=args$slice.idx$window))
+        from = seq(1, length(y$test.outcome), args$slice.idx$window)
+        trialidx$test = matrix(mapply(seq, from, from+args$slice.idx$window-1), nrow=args$slice.idx$window)
+        if (args$decomp$CSP) { #save outcome grouping (not required for SPoC)
+          trialidx$group = lapply(args$decomp$classes, function(class) which(y$train.outcome[ trialidx$train[1,] ] == class))
+        } else { #SPoC
+          trialidx$z = scale(as.numeric(y$train.outcome[ trialidx$train[1,] ]))
+        }
+        return(trialidx)  
+      }
+      if (args$within) return( lapply(y, GET) )
+      return( GET(y) ) #else: across/between
+    }
+    update.outcome <- function(y, trialidx) { #reduce to 1 outcome value per trial if approx
+      UPDATE <- function(y, idx) {
+        return( list(train.outcome = y$train.outcome[ idx$train[1,] ], 
+                     test.outcome = y$test.outcome[ idx$test[1,] ]) )
+      }
+      if (args$within) return( lapply(seq_along(y), function(sub) UPDATE(y[[sub]], trialidx[[sub]])) )
+      return( UPDATE(y, trialidx) ) #else: across/between
+    }
+  }
   ### START FITTING ###
-  run.performance = list() #collect run results
+  run_performance = list() #collect run results
   for ( run in seq_len(repetitions) ) {
     runtime = proc.time()[3]
     if (repetitions > 1) cat("Run",run,"\n")
@@ -167,7 +218,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     } else {
       folds = CV
     }
-    fold.performance = list() #collect fold results
+    fold_performance = list() #collect fold results
     for ( foldnum in folds[, unique(fold)] ) { #iterate the folds
       cat("Fold",foldnum)
       #subset data into test/training sets:
@@ -207,15 +258,10 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
       #remove NULL list elements from testdata so positions are identical across lists
       if (GAT && args$within && length(posIDs) < length(subIDs)) testdata = testdata[ !sapply(testdata, is.null) ]
       #create outcome list separately as it remains identical across slices
-      if (args$within) {
-        cvoutcome = lapply(slicelist[[1]][posIDs], function(idx) {
-          list(train.outcome = dataInfo$outcome[ idx[idx %in% trainIdx] ], 
-               test.outcome = dataInfo$outcome[ idx[idx %in% testIdx] ])
-        })
-      } else {
-        idx = slicelist[[1]]
-        cvoutcome = list(train.outcome = dataInfo$outcome[ idx[idx %in% trainIdx] ], 
-                         test.outcome = dataInfo$outcome[ idx[idx %in% testIdx] ])
+      cvoutcome = get.outcome(dataInfo$outcome, slicelist[[1]])
+      if (args$decompose) {
+        trialidx = get.trialidx(cvoutcome) #save indices (order is invariant across slices)
+        if (args$decomp$approx) cvoutcome = update.outcome(cvoutcome, trialidx) #subset to one outcome value per trial
       }
       #fit a model with unchanged (true) labels:
       performance = foreach(slice=cvdata, .combine=function(...) rbindlist(list(...), idcol="slice"),
@@ -232,31 +278,26 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
         dataInfoP = setkeyv(rbind( data.permute_classes(dataInfo[trainIdx], ptol, train.allow), 
                                    data.permute_classes(dataInfo[testIdx], ptol, test.allow) ), pkeys)
         #update outcome
-        if (args$within) {
-          cvoutcome = lapply(slicelist[[1]][posIDs], function(idx) {
-            list(train.outcome = dataInfoP$outcome[ idx[idx %in% trainIdx] ], 
-                 test.outcome = dataInfoP$outcome[ idx[idx %in% testIdx] ])
-          })
-        } else {
-          idx = slicelist[[1]]
-          cvoutcome = list(train.outcome = dataInfoP$outcome[ idx[idx %in% trainIdx] ], 
-                           test.outcome = dataInfoP$outcome[ idx[idx %in% testIdx] ])
+        cvoutcome = get.outcome(dataInfoP$outcome, slicelist[[1]])
+        if (args$decompose) {
+          trialidx = get.trialidx(cvoutcome) #save indices (order is invariant across slices)
+          if (args$decomp$approx) cvoutcome = update.outcome(cvoutcome, trialidx) #subset to one outcome value per trial
         }
-        perform.rand = foreach(slice=cvdata, .combine=function(...) rbindlist(list(...), idcol="slice"), 
+        perform_rand = foreach(slice=cvdata, .combine=function(...) rbindlist(list(...), idcol="slice"), 
                                .multicombine=T, .maxcombine=length(cvdata)+1) %dopar%
                                {
                                  if (GAT) fit.GAT(slice) else fit.slice(slice)             
                                }
-        if ( truelength(perform.rand) == 0 ) alloc.col(perform.rand, 10) #fix to 0 allocated columns error when parallelized without slicing
-        performance = rbind(performance, set(perform.rand, j="label", value="random")) #bind to existing performance DT
+        if ( truelength(perform_rand) == 0 ) alloc.col(perform_rand, 10) #fix to 0 allocated columns error when parallelized without slicing
+        performance = rbind(performance, set(perform_rand, j="label", value="random")) #bind to existing performance DT
       }
-      fold.performance[[foldnum]] = performance #add to fold list
+      fold_performance[[foldnum]] = performance #add to fold list
       cat(" | Time elapsed (mins):", round((proc.time()[3]-runtime)/60,2), "\n")
     } #end of fold
-    run.performance[[run]] = rbindlist(fold.performance, idcol=if (length(fold.performance)>1) "fold") #bind to one DT
+    run_performance[[run]] = rbindlist(fold_performance, idcol=if (length(fold_performance)>1) "fold") #bind to one DT
   } #end of run
   ### END FITTING ###
-  performance = rbindlist(run.performance, idcol=if (repetitions>1) "run") #bind to one DT
+  performance = rbindlist(run_performance, idcol=if (repetitions>1) "run") #bind to one DT
   keys = intersect( c("subject","slice","test","run","label","fold"), names(performance) ) #key existing info columns
   setcolorder( performance, union(keys, names(performance)) ) #re-arrange column order
   setkeyv(performance[, label := factor(label, levels=c("true","random"))], keys) #sort by key order
@@ -548,83 +589,97 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   }
 }
 
-.DECOMPOSE <- function(train, test, args) {
+.DECOMPOSE <- function(data, idx, args) {
   ## data decomposition / feature transformation
-  C = setkeyv( train[, {
-    mat = as.matrix(.SD)
-    C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(args$nm), byrow=T ) ) #with centering
-    # C = cov(mat) #without centering
-    lapply(1:length(args$nm), function(ch) C[,ch])
-  }, .SDcols = args$nm, by=.(subject,trial,outcome)][, .idx := 1:length(args$nm)][, {
-    lapply(.SD, mean) }, .SDcols=args$nmV, by=.(subject,outcome,.idx)], c("subject","outcome") )
-#   C = setkeyv( train[, { 
-#     # mat = as.matrix(.SD)
-#     # C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(nm), byrow=T ) )
-#     C = cov(.SD) #without centering
-#     lapply(1:length(args$nm), function(ch) C[,ch])
-#   }, .SDcols=args$nm, by=.(subject,outcome)], c("subject","outcome") )
-  
-  dat = C[, { #create spatial filters with training set covariance matrices
-    C1 = as.matrix(.SD[ 1:(.N/2) ])
-    C2 = as.matrix(.SD[ (.N/2+1):.N ])
-    VD = eigen(C1+C2, symmetric=T)
-    V = VD$vectors
-    d = VD$values
-    r = sum(d > 10^-6*d[1])
-    if (r < 2*args$npattern) stop( "Too few data columns to calculate", 2*args$npattern, "filters." )
-    P = diag(d[1:r]^-0.5) %*% t(V[,1:r])
-    S1 = P %*% C1 %*% t(P)
-    R = eigen(S1, symmetric=T)$vectors
-    W = t(P) %*% R
-    filters = W[,c(1:args$npattern, (ncol(W)-args$npattern+1):ncol(W))]
-    #create features for ML by applying training set filters to both train and test set
-    rbind(train,test)[subject == .BY$subject, { 
-      features = as.matrix(.SD) %*% filters
-      lapply(seq_len(2*args$npattern), function(f) {
-        if (args$approx) {
-          feat = var(features[,f])
-          ifelse(args$logscale, ifelse(feat > 0, log(feat), -70), feat) #replace -Inf with -70 (~ log(4^-31))
+  if (args$CSP) {
+    CSP <- function(data, idx, args) {
+      #compute covariance matrices on training data
+      if (args$average) { #compute within trials and average afterwards
+        C = lapply(1:ncol(idx$train), function(i) {
+          if (args$shrinkage) { #shrinkage covariance
+            corpcor::cov.shrink(data$train[ idx$train[,i], ], verbose=F)
+          } else { #sample covariance (N-1) on centered data
+            cov(scale(data$train[ idx$train[,i], ], scale=F))
+          }
+        })
+        #average each outcome C separately
+        C1 = Reduce("+", C[ idx$group[[1]] ])/length(idx$group[[1]])
+        C2 = Reduce("+", C[ idx$group[[2]] ])/length(idx$group[[2]])
+      } else { #compute across trials
+        if (args$shrinkage) {
+          C1 = corpcor::cov.shrink(data$train[ as.vector(idx$train[, idx$group[[1]] ]), ], verbose=F)
+          C2 = corpcor::cov.shrink(data$train[ as.vector(idx$train[, idx$group[[2]] ]), ], verbose=F)
         } else {
-          features[,f]
+          C1 = cov(scale(data$train[ as.vector(idx$train[, idx$group[[1]] ]), ], scale=F))
+          C2 = cov(scale(data$train[ as.vector(idx$train[, idx$group[[2]] ]), ], scale=F))
         }
-      })
-    }, .SDcols=args$nm, by=.(subject,trial,outcome)][, subject:=NULL]
-  }, .SDcols=args$nmV, by=subject]
-  setkeyv(dat, c("subject","trial","outcome"))
-  return(dat)
+      }
+      #compute filters for whitening
+      VD = eigen(C1+C2, symmetric=T) #V: eigenvectors, D: eigenvalues (lambda)
+      r = sum(VD$values > 10^-6*VD$values[1]) #estimate rank
+      if (r < 2*args$npattern) stop( "Not enough independent data columns (",r,") to compute ",2*args$npattern," patterns." )
+      P = diag(VD$values[1:r]^-0.5) %*% t(VD$vectors[,1:r]) #whitening matrix P, such that P * (C1+C2) * P' = I
+      S1 = P %*% C1 %*% t(P) #whitened spatial covariance matrix for class 1
+      R = eigen(S1, symmetric=T)$vectors #now an ordinary eigenvalue decomposition
+      W = t(P) %*% R #unwhitened spatial filters
+      return( W[,c(1:args$npattern, (ncol(W)-args$npattern+1):ncol(W))] ) #first n and last n cols
+    }
+    if (args$multiClass) { #One-vs-rest to transform the multiclass problem into several binary ones
+      OVRidx = idx
+      W = do.call(cbind, lapply( seq_along(idx$group), function(g) { #iterate the class indices
+        OVRidx$group = list(idx$group[[g]], do.call(c, idx$group[-g])) #collpase 'rest' to one class
+        CSP(data, OVRidx, args) #compute filters and column-bind
+      }))
+    } else { #binary
+      W = CSP(data, idx, args)
+    }
+  } else { #SPoC
+    #compute average C across all trials and demean each trial's cov mat
+    C_trials = lapply(1:ncol(idx$train), function(i) {
+      if (args$shrinkage) { #shrinkage covariance
+        corpcor::cov.shrink(data$train[ idx$train[,i], ], verbose=F)
+      } else { #sample covariance (N-1) on centered data
+        cov(data$train[ idx$train[,i], ])
+      }
+    })
+    C = Reduce("+", C_trials)/length(C_trials) #mean C
+    C_trials = lapply(C_trials, function(Ct) Ct-C) #mean-free trialwise C
+    Ct_vec = do.call(cbind, lapply(C_trials, as.vector)) #vectorized trialwise C (column vectors)
+    #z-weighted covariance matrix:
+    Cz = matrix(Ct_vec %*% idx$z, nrow(C), ncol(C)) / length(C_trials)
+    #compute filters for whitening 
+    VD = eigen(C, symmetric=T) #V: eigenvectors, D: eigenvalues (lambda)
+    r = sum(VD$values > 10^-6*VD$values[1]) #estimate rank
+    if (r < 2*args$npattern) stop( "Not enough independent data columns (",r,") to compute ",2*args$npattern," patterns." )
+    P = diag(VD$values[1:r]^-0.5) %*% t(VD$vectors[,1:r]) #whitening matrix P, such that P * C * P' = I
+    Sz = P %*% Cz %*% t(P) #whitened Cz
+    R = eigen(Sz, symmetric=T)$vectors #now an ordinary eigenvalue decomposition
+    W = t(P) %*% R #unwhitened spatial filters
+    W = W[,c(1:args$npattern, (ncol(W)-args$npattern+1):ncol(W))]
+  }
+  #project data with filters into component space
+  data$train = data$train %*% W
+  data$test = data$test %*% W
+  if (args$approx) { #compute trial-wise component variance
+    n = nrow(idx$train)
+    data$train = t( apply(idx$train, 2, function(i) { 
+      x = data$train[i,]
+      (colMeans(x*x) - colMeans(x)^2) * n/(n-1)
+    }) )
+    data$test =  t( apply(idx$test, 2, function(i) { 
+      x = data$test[i,]
+      (colMeans(x*x) - colMeans(x)^2) * n/(n-1)
+    }) )
+    if (args$logscale) {
+      if ( min(data$train) < .Machine$double.eps || min(data$test) < .Machine$double.eps ) {
+        warning( "0 variance replaced with ", .Machine$double.eps, " to prevent -Inf after log." )
+        data$train[ which(data$train < .Machine$double.eps) ] = .Machine$double.eps
+        data$test[ which(data$test < .Machine$double.eps) ] = .Machine$double.eps
+      }
+      data$train = log(data$train)
+      data$test = log(data$test)
+    }
+  }
+  return(data)
 }
 
-
-# .DECOMPOSE <- function(train, test, args) {
-#   C = setkeyv( train[, {
-#     mat = as.matrix(.SD)
-#     C = cov( mat - matrix( colMeans(mat), nrow=.N, ncol=length(args$nm), byrow=T ) ) #with centering
-#     # C = cov(mat) #without centering
-#     lapply(1:length(args$nm), function(ch) C[,ch])
-#   }, .SDcols = args$nm, by=.(subject,trial,outcome)][, .idx := 1:length(args$nm)][, {
-#     lapply(.SD, mean) }, .SDcols=args$nmV, by=.(subject,outcome,.idx)], c("subject","outcome") )
-#   
-#   dat = C[, { #create spatial filters with training set covariance matrices
-#     C1 = as.matrix(.SD[ 1:(.N/2) ])
-#     C2 = as.matrix(.SD[ (.N/2+1):.N ])
-#     VD = eigen(C1+C2, symmetric=T)
-#     V = VD$vectors
-#     d = VD$values
-#     r = sum(d > 10^-6*d[1])
-#     if (r < 2*args$npattern) stop( "Too few data columns to calculate", 2*args$npattern, "filters." )
-#     P = diag(d[1:r]^-0.5) %*% t(V[,1:r])
-#     S1 = P %*% C1 %*% t(P)
-#     R = eigen(S1, symmetric=T)$vectors
-#     W = t(P) %*% R
-#     filters = W[,c(1:args$npattern, (ncol(W)-args$npattern+1):ncol(W))]
-#     # filters = apply(filters, 2, function(w) w/sqrt(t(w)%*%((C1+C2)/2)%*%w)) #scale to unit variance
-#     # filters = apply(filters, 2, function(w) w/sqrt(sum(w^2))) #normalize by 2-norm (euclidian distance for vectors)
-#     #create features for ML by applying training set filters to both train and test set
-#     rbind(train,test)[subject == .BY$subject, { 
-#       features = as.matrix(.SD) %*% filters
-#       lapply(seq_len(2*args$npattern), function(f) features[,f])
-#     }, .SDcols=args$nm, by=.(subject,trial,outcome)][, subject:=NULL]
-#   }, .SDcols=args$nmV, by=subject][, sample := c( train[, sample], test[, sample] )]
-#   setkeyv(dat, c("subject","trial","sample","outcome"))
-#   return(dat)
-# }
