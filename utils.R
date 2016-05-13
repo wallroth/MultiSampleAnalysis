@@ -41,15 +41,14 @@ read.data <- function(path=".", pattern="*.csv", nCores=NULL, ...) {
   }
   files = list.files(path=path, pattern=pattern, full.names=T)
   cluster = parBackend(cores=nCores, required=length(files)) #parallelize read in
-  outlen = ifelse(length(files) > 100, length(files), 100) #for .maxcombine argument of foreach
-  data = foreach(f=files, .combine = list, .multicombine = T, .maxcombine=outlen) %dopar%
+  data = foreach(f=files, .combine = list, .multicombine = T, .maxcombine=length(files)+1) %dopar%
   {
     d = do.call(fread, modifyList(args$fread, list(input=f)) ) #read file
     do.call( data.setinfo, modifyList(args$data.setinfo, list(data=d)) ) #set info attributes
   }
   parBackend(cores=cluster) #shut down cluster (if created by inside call)
   if ( length(files) > 1 ) { #list of multiple subjects
-    if ( all(sapply(data, function(d) d[, unique(subject)]) == 0L) ) { #subject info was not set
+    if ( all(sapply(data, function(d) d[, unique(subject) == 0L])) ) { #subject info was not set
       data = rbindlist(lapply(data, function(d) d[, subject:=NULL]), idcol="subject", use.names=T)
     } else {
       data = rbindlist(data, use.names=T)
@@ -391,8 +390,8 @@ parBackend <- function(cores=NULL, ...) {
   #       or a cluster object to shut down; or an empty list to take no action (to leave a cluster active)
   #...: pass the argument 'required' to specify number of jobs (internally used by functions)
   #RETURNS: the cluster object (list) or nothing (if shut down) or passes the empty list without action
+  .eval_package("foreach", load=T)
   if ( !is.list(cores) ) { #initialize a backend
-    .eval_package("foreach", load=T)
     start.time = proc.time()[3] #includes time spent on initialization of the cluster
     cores = min( min( cores, parallel::detectCores() ), list(...)$required ) #sanity check user input 
     #start up the CPU cluster
