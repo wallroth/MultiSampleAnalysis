@@ -200,6 +200,39 @@ data.merge_classes <- function(data, classes, new.labels=NULL, copy=F) {
   return( data.check(data)[] )
 }
 
+data.match_baseline <- function(data, baseline, normalize=F, remove=F, method="forward-reverse") {
+  #INPUT ---
+  #baseline: vector of sample numbers to align as baseline condition against the rest
+  #normalize: if True, demean the rest with the baseline period
+  #remove: if True, remove the baseline after matching 
+  #method: character, one of:
+  #        - forward-reverse: concatenate samples forward (1:N) and then go backwards (N-1:1)
+  #                           until the lenghts are matched; retains chronological coherence
+  #        - concat: concatenate the samples (1:N) until the lenghts are matched (leaves possible transition points)
+  #        - shuffle: randomly select the sample at each time point, balanced for samples to be equally likely
+  #                   and kept constant across trials, i.e. sample x is chosen for every trial at a time point
+  #RETURNS ---
+  #data with outcome 0 (baseline) and stimulus (1)
+  #trial numbers of the baseline are the negative of their original number
+  #sample numbers are rewritten to 1:N
+  data = data.check(data)
+  #overwrite outcome values: baseline = 0, stimulus = 1
+  d = data.merge_classes(data, classes=data[, unique(outcome)], new.labels="1", copy=T)
+  if (normalize) data.normalize(d, baseline=baseline) #in place
+  base = data.subset_samples(d, select=baseline) #subset
+  base = data.merge_classes(base, classes="1", new.labels="0")
+  if (remove) d = data.subset_samples(d, select=baseline, invert=T)
+  #match up samples
+  n = d[, uniqueN(sample)]
+  sn = base[, unique(sample)] #sample nums
+  if (method == "forward-reverse") sn = c( sn, rev(sn[-c(1,length(sn))]) ) #forward and reverse concatenation
+  idx = rep_len(sn, n) #same sample across trials
+  if (method == "shuffle") idx = sample(idx)
+  base = base[, .SD[idx], keyby=.(subject,trial)][, ':=' (sample = d$sample, trial = trial*-1)]
+  d = setkeyv( rbind(base, d)[, outcome := ordered(outcome, levels=c(0,1))], key(data) )[]
+  return(d)
+}
+
 data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, min.var=0, plot=F) {
   #detect outlier trials based on variance criterion, i.e. trial's whose averaged channel-wise variance
   #exceeds a threshold are removed from the data. threshold formula: Q+C*IQR
