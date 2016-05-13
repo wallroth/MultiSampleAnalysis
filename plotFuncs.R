@@ -26,9 +26,9 @@
 }
 
 plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, hline=NULL, vline=NULL,
-                        xvar="slice", yvar="AUC", groupvar="label", id="subject", xlab="Time (ms)", ylab="AUC", legend="Labels",
+                        xvar="slice", yvar="AUC", groupvar="label", idvar="subject", xlab="Time (ms)", ylab="AUC", legend="Labels",
                         xrange=NULL, xticks=NULL, xlabels=NULL, ylims=NULL, yticks=NULL, ylabels=NULL, size=NULL, signpos=NULL, 
-                        txt="", txtpos=NULL, txtcol="#666666", txtsize=5, cols=c("#0072BD", "black"), ggTheme=.ggTheme(), ...) {
+                        txt="", txtpos=NULL, txtcol="#666666", txtsize=5, cols=c("#0072BD", "#666666"), ggTheme=.ggTheme(), ...) {
   ## provide visualization of per slice averaged decoding result
   #INPUT ---
   #result: decoding output, or more generally any data frame/data table
@@ -45,7 +45,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   #              i.e. to indicate chance/significance level (hline) or stimulus onset time (vline)
   #xvar, yvar: variable on the x-/y-axis
   #groupvar: grouping variable which separates the x/y data points, can be left empty
-  #id: subject column, can be left empty
+  #idvar: subject column, can be left empty
   #xlab, ylab, legend: labels of the axes/legend
   #xrange: actual time range of measurements, i.e time of 1st/last sample;
   #        if non-NULL, the time points wil replace the slice numbering on the x-axis
@@ -68,26 +68,37 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   #ggTheme: ggplot theme, possible to modify details by adding + theme(...) 
   #         e.g. ggTheme + theme(legend.position = "none")
   .eval_package("ggplot2", load=T)
-  if (!is.data.table(result)) result = setDT(copy(result), key=c(id, xvar, groupvar))
-  args.in = lapply( as.list(match.call())[-c(1,2)], eval.parent, n=2 )
-  cols = args.in$cols
-  args = do.call( .eval_ellipsis, modifyList(args.in, list(funStr="decode.test")) )
-  args$decode.test = lapply( modifyList(args$decode.test, list(dv="y", within.var="g", between="x", id="id"))[-1], eval )
-  #rename (or add if missing) columns
-  result = setnames(copy(result), old=c(yvar,xvar), new=c("y","x"))
-  timeAxis = !is.null(groupvar) && nzchar(groupvar) && groupvar %in% names(result) #xAxis = time if a groupvar was supplied
-  if (timeAxis) setnames(result, old=groupvar, new="g") else result[, g:=0]
-  if (!is.null(id) && nzchar(id)) setnames(result, old=id, new="id") else result[, id:=0]
+  if (!is.data.table(result)) setDT(result)
+  # args.in = lapply( as.list(match.call())[-c(1,2)], eval.parent, n=2 )
+  args.in = as.list(match.call())[-c(1,2)]
+  for (e in args.in) eval(e) #evaluate variable input within function scope
   if (is.null(size)) size = ifelse(lineplot, 1.2, .5)
-  average = average && is.null(multi.layout) #one plot
-  data = result[, .(y=mean(y)), by=.(id,x,g)] #average y per id, group and x
+  args = do.call( .eval_ellipsis, modifyList(args.in, list(funStr="decode.test")) )
+  args$decode.test = lapply( modifyList(args$decode.test, list(dv="y", within.var="g", between="x"))[-1], eval )
+  IDs = !is.null(idvar) && nzchar(idvar) && idvar %in% names(result)
+  groups = !is.null(groupvar) && nzchar(groupvar) && groupvar %in% names(result)
   ptest = !is.null(args.in$test) && args$decode.test$test != "none"
+  average = (average && is.null(multi.layout)) || !IDs #one plot
+  if (ptest) { #make sure everything is in order for the significance testing (if requested)
+    if (!IDs) stop( "Please supply an id for the group comparison." )
+    if (!groups) stop( "Please supply a group variable for which to compute the comparison." )
+    if ( length(unique(result[[groupvar]])) != 2 ) stop( "The group variable must have exactly 2 levels." )
+    if (!(average || (lineplot && is.null(multi.layout))) && args$decode.test$id == idvar) {
+      if ("fold" %in% names(result)) args$decode.test$id = "fold"
+      else stop( "Group and test id are identical with no fold information present.", 
+                 "Please specifiy with 'id' the identifier for the within case comparison." )
+    } 
+  }
+  #rename (or add if missing) columns
+  setnames(result, old=c(yvar,xvar), new=c("y","x"))
+  if (groups) setnames(result, old=groupvar, new="g") else result[, g:=0]
+  if (IDs) setnames(result, old=idvar, new="id") else result[, id:=0]
+  data = result[, .(y=mean(y)), by=.(id,x,g)] #average y per id, group and x
   signtest = NULL
   if (ptest) { #calculate p-values
     if ( average || (lineplot && is.null(multi.layout)) ) {
-      signtest = do.call(decode.test, modifyList( args$decode.test, list(result=data, bootstrap=F)) )
+      signtest = do.call(decode.test, modifyList( args$decode.test, list(result=data, bootstrap=F, id="id")) )
     } else { #evaluate significance for each subject individually
-      args$decode.test$id = "fold"
       signtest = result[, do.call(decode.test, modifyList( args$decode.test, list(result=.SD, bootstrap=F)) ), by=id]
     }
   }
@@ -116,10 +127,10 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
 #     }
   } else if (!CI && average && lineplot) {
     data = data[, .(y=mean(y)), by=.(x,g)]
-  } else if (!average && !lineplot) {
-    data = result #unaggregated data for individual boxplots
+  } else if (!lineplot) {
+    data = copy(result) #unaggregated data for individual boxplots
   }
-  if (timeAxis) { #xAxis
+  if (lineplot || groups) { #design xAxis if lineplot or for boxplot if groups were specified in addition to xvar
     npoints = data[, uniqueN(x)] #number of points on xAxis
     if (!is.null(xrange)) { #replace slice number with time stamp
       timestep = diff(xrange)/npoints
@@ -154,18 +165,18 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   }
   if (is.null(signpos)) signpos = ifelse(is.null(ylims), data[, max(y)], ylims[2]) #significance indicator ypos
   ## preparation end ##
-  
   ggLineplot <- function(data, signtest=NULL, txt="") {
     p = ggplot(data=data, aes(x=x, y=y, group=g, fill=g, colour=g)) +
-      geom_line(size=size) + scale_color_manual(values=cols) + 
-      labs(x=xlab, y=ylab, group=legend, fill=legend, colour=legend) + ggTheme
+      geom_line(size=size) + ggTheme +
+      labs(x=xlab, y=ylab, group=legend, fill=legend, colour=legend)
+    if (length(cols) >= data[, uniqueN(g)]) p = p + scale_color_manual(values=cols)
     if (!is.null(ylims)) {
       p = p + coord_cartesian(ylim=ylims)
       if (!is.null(ylabels)) p = p + scale_y_continuous(breaks=yticks, labels=ylabels)
     }
     if (!is.null(xlabels)) p = p + scale_x_continuous(breaks=xticks, labels=xlabels, expand=c(0,0))
-    if (!is.null(hline)) p = p + geom_hline(yintercept=hline , linetype="dotted", size=0.1)
-    if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dotted", size=0.1)
+    if (!is.null(hline)) p = p + geom_hline(yintercept=hline , linetype="dotted")
+    if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dashed")
     if (nzchar(txt)) p = p + annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=txtsize)
     if (CI) p = p + geom_ribbon(aes(ymin=y-t*se, ymax=y+t*se), alpha=0.3, colour=NA, show.legend=F) + scale_fill_manual(values=cols)
     if (ptest) { #draw horizontal line with its center above significant time point(s)
@@ -181,20 +192,20 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
     }
     return(p)
   }
-
   ggBoxplot <- function(data, signtest=NULL, txt="") {
     update_geom_defaults("point", list(colour = NULL)) #for boxplot outlier colouring
-    if (timeAxis) {
+    if (groups) {
       data[, grouping:=interaction(x,g)]
       p = ggplot(data=data, aes(x=x, y=y, group=grouping, fill=g, colour=g))
-      if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dotted", size=0.1)
+      if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dashed")
       if (!is.null(xlabels)) p = p + scale_x_continuous(breaks=xticks, labels=xlabels, expand=c(0.01,0.01))
+      if (length(cols) >= data[, uniqueN(g)]) p = p + scale_color_manual(values=cols) + scale_fill_manual(values=cols)
     } else { #no groupvar
       p = ggplot(data=data, aes(x=x, y=y, fill=x, colour=x))
+      if (length(cols) >= data[, uniqueN(x)]) p = p + scale_color_manual(values=cols) + scale_fill_manual(values=cols)
     }
-    if (!is.null(hline)) p = p + geom_hline(yintercept=hline , linetype="dotted", size=0.1)
-    p = p + geom_boxplot(size=size, outlier.size=size/2) + labs(x=xlab, y=ylab, fill=legend, colour=legend) +
-      scale_color_manual(values=cols) + scale_fill_manual(values=cols) + ggTheme
+    if (!is.null(hline)) p = p + geom_hline(yintercept=hline , linetype="dotted")
+    p = p + geom_boxplot(size=size, outlier.size=size/2) + labs(x=xlab, y=ylab, fill=legend, colour=legend) + ggTheme
     if (!is.null(ylims)) {
       p = p + coord_cartesian(ylim=ylims)
       if (!is.null(ylabels)) p = p + scale_y_continuous(breaks=yticks, labels=ylabels)
@@ -215,24 +226,29 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
     update_geom_defaults("point", list(colour = "black")) #change back
     return(p)
   }
-  
-  ## plot 
-  if (!is.null(id) && nzchar(id)) n = result[, uniqueN(id)] else n = result[, uniqueN(fold)]
   if (CI) t = qt(1-args$decode.test$alpha/2, result[x==x[1], .N, by=g][1,N-1]) #t-statistic for confidence interval
+  if (!groups && lineplot) ggTheme = ggTheme + theme(legend.position="none")
+  data[, g:=as.factor(g)]
+  #undo changes to result
+  setnames(result, old=c("y","x"), new=c(yvar,xvar))
+  if (!groups) result[, g:=NULL] else setnames(result, "g", groupvar)
+  if (!IDs) result[, id:=NULL] else setnames(result, "id", idvar)
+  ## plot 
   plotStr = ifelse(lineplot, "ggLineplot", "ggBoxplot")
   if (average) { #single lineplot aggregated for all subjects
     p = do.call(plotStr, list(data, signtest, txt))
     return(p)
   } else { #no averaging
+    n = result[, uniqueN(id)]
     if (is.null(multi.layout) && lineplot) { #single plot
       data = data[ g != args$decode.test$within.null ][, g:=NULL] #keep only true label data
       if (length(cols) < n) cols = colorRampPalette(c("gray30","gray90"), alpha=T)(n)
-      setnames(data, "id", "g")[, g := as.factor(g)] #group (colour) by subject
+      setnames(data, "id", "g")[, g := as.factor(g)] #group (colour) by id
       p = ggLineplot(data, signtest, txt=txt) + 
-        geom_line(mapping=aes(x=x,y=y), size=size, col="black", data=data[, .(y=mean(y)), by=x], inherit.aes=F)
+        geom_line(mapping=aes(x=x,y=y), size=size, col="black", data=data[, .(y=mean(y)), by=x], inherit.aes=F) #average
       return(p)
     } else { #multiple plots
-      if (is.null(multi.layout) && !lineplot) multi.layout=c(1,1) #one boxplot per page
+      if (is.null(multi.layout)) multi.layout=c(1,1) #one boxplot per page
       .eval_package("gridExtra", load=T)
       idVals = data[, unique(id)]
       if (length(txt) != n) txt = paste0(txt, idVals)
@@ -248,98 +264,136 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   }
 }
 
-plot.GAT <- function(GAT, contrast=F, xrange=c(-500,2000), onset=T, limits=NULL, ticks=NULL, 
-                     labels=NULL, xlab="Generalization time", ylab="Training time", legend="AUC",
-                     txt="", txtpos=NULL, txtcol="#666666", showBar=T,
-                     ggTheme=.ggTheme(), colScheme=NULL, colNum=100, smooth=F, ...) {
-  ## plots the GAT matrix as obtained by decoding.GAT
+plot.GAT <- function(GAT, contrast=F, range=NULL, onset=T, limits=NULL, ticks=NULL, labels=NULL, 
+                     dv="AUC", groupvar="label", idvar="subject", xlab="Generalization time",
+                     ylab="Training time", legend="AUC", txt="", txtpos=NULL, txtcol="#666666", txtsize=5, 
+                     contrast.col="black", showBar=T, ggTheme=.ggTheme(), colScheme=NULL, colNum=100, smooth=F, ...) {
+  ## plots the GAT matrix
   #INPUT:
-  #GATmatrix: the output of decode.GAT
-  #contrast: character naming one of difference, significance, threshold; requires permutation results
-  #          - difference: the average random performance is subtracted form the avg true perf
-  #          - significance: p-values are computed via decode.test and plotted instead of AUC
-  #          - threshold: signifies if the 1-alpha quantile of the permutation performance 
-  #                       (either bootstrapped or directly from permutations) was exceeded (i.e. binary)
-  #xrange: actual time range of measurements, i.e time of 1st/last sample
-  #           the timepoints are then set as the transition from one slice to the next
+  #GAT: the output of decode with GAT=T, more generally a data table with columns slice, test
+  #contrast: if True, p values are computed for the difference in dv between groupvar;
+  #          significant pvals will be plotted ontop as contour lines (colour set via contrast.col)
+  #          arguments of decode.test (via ...) can be used to modify the test settings
+  #range: actual time range of measurements, i.e time of 1st/last sample
+  #       the timepoints are left-aligned, i.e. first slice = range[1]
   #onset: if True, highlight time 0 with dashed lines
-  #limits: limits of the colour scale, corresponds to AUC values (between 0 and 1)
-  #ticks: ticks to put on the x/y axis, defaults to all slices
-  #       if only labels are specified, ticks will be set where labels are
-  #labels: time stamps you want displayed, default is the same as ticks if not NULL,
-  #        else every slice_num/10th tick is labelled (to make them readable)
+  #limits: limits of the colour scale (corresponds to dv)
+  #ticks: ticks to put on the x/y axis; if only labels are specified, ticks will be set where labels are
+  #labels: time stamps to display, defaults to every tick
+  #groupvar: group for contrast, can be left empty if no contrast;
+  #          any group factor that is different from within.null will be aggregated for the plot
+  #idvar: id variable for contrast, can be left empty if no contrast
   #xlab, ylab, legend: titles of the respective part
-  #colScheme: colour scheme of the raster, defaults to matlab style
+  #txt, txtpos, txtcol, txtsize: text to display within the plot and respective settings
+  #contrast.col: colour of the contour lines if contrast = T and significant pvals found
+  #showBar: show the colour bar to indicate colour coding of dv; 
+  #         these settings can be modified: barwidth, barheight, nbin, barticks
+  #colScheme: colour scheme of the raster, defaults to matlab style (jetcolours)
   #colNum: number with which a colour gradient is created from colScheme, i.e. number of distinct colours
   #smooth: if True, the raster is smoothed via linear interpolation
-  #...: further arguments to decode.test (if contrast is significance or threshold)
+  #...: further arguments to decode.test (if contrast)
+  if ( !all(c("slice","test") %in% names(GAT)) ) stop( "GAT is expected with columns 'slice' and 'test'." )
   .eval_package("ggplot2", load=T)
-  args.in = list(...)
-  if (is.null(colScheme)) colScheme = c("#000088","#000FFD","#00FFFF","#80FF67","#FFFF00","#FF2000","#7F0000")
-  GAT = GAT[, .(AUC=mean(AUC)) , keyby=.(subject,label,slice,test)]
-  GAT.data = GAT[label=="true", .(AUC=mean(AUC)) , by=.(slice,test)]
+  args.in = as.list(match.call())[-c(1,2)]
+  for (e in args.in) eval(e) #evaluate variable input within function scope
+  args = lapply( do.call(.eval_ellipsis, modifyList(args.in, list(funStr="decode.test")))$decode.test[-1], eval )
+  if (is.null(colScheme)) colScheme = c("#00007F","blue","#007FFF","cyan","#7FFF7F","yellow","#FF7F00","red","#7F0000")
+  IDs = !is.null(idvar) && nzchar(idvar) && idvar %in% names(GAT)
+  groups = !is.null(groupvar) && nzchar(groupvar) && groupvar %in% names(GAT)
   if (contrast) {
-    args = do.call(.eval_ellipsis, modifyList(args.in, list(funStr="decode.test")))
-    stest = tolower(args$decode.test$test)
-    signtest = GAT[, { 
-      ptab = .SD[, {
-        if (stest == "wilcox") wilcox.test(AUC ~ label, paired=T, alternative="greater")$p.value
-        else t.test(AUC ~ label, paired=T, alternative="greater")$p.value
-      }, by=slice]
-      ptab
-    }, by=test]
-    GAT.data = GAT.data[signtest, on=c("slice","test")][, p:=p.adjust(V1, method=args$decode.test$adjust)]
+    if (!IDs) stop( "Please supply an id for the contrast." )
+    if (!groups) stop( "Please supply a group variable for which to compute the contrast." )
+    if ( length(unique(GAT[[groupvar]])) != 2 ) stop( "The group variable must have exactly 2 levels." )
+    if ( !args$within.null %in% unique(GAT[[groupvar]]) ) stop( "Please specify the null variable for the contrast via 'within.null'. ")
+    setnames(GAT, old=idvar, new="id")
   }
-  # get axis values: the end of each slice's time range marks a tick
-  len = GAT.data[, uniqueN(slice)] #number of ticks on axis
-  #each timepoint marks the transition from one slice to the next
-  timepoints = seq( xrange[1], xrange[2], length.out = len+1 )[-1]
-  GAT.data[, ':=' (tTrain = timepoints[GAT.data[, slice]], tTest = timepoints[GAT.data[, test]])]
-  if (is.null(limits)) {
-    limits = GAT.data[, round( c(min(AUC), max(AUC)), 1 )]
-    #make sure all values are mapped by the colour range
-    if ( limits[1] > GAT[, min(AUC)] ) limits[1] = GAT.data[, round( min(AUC)-0.1, 1 )]
-    if ( limits[2] < GAT[, max(AUC)] ) limits[2] = GAT.data[, round( max(AUC)+0.1, 1 )]
-  }
-  if (is.null(labels)) {
-    if (is.null(ticks)) {
-      ticks = timepoints
-      step = round( len/10 ) #stepsize for displayed labels
-      idx <- seq(1, len, step) #ticks with labels
-      labels <- as.character( round(timepoints) )
-      labels[-idx] <- ""
-    } else {
-      labels = ticks
+  setnames(GAT, old=dv, new="dv")
+  #aggregate data & compute contrast between groups if applicable
+  if (groups) {
+    setnames(GAT, old=groupvar, new="g")
+    if (contrast) { #test at each slice,test pair the group contrast for id
+      GAT.data = GAT[, .(dv=mean(dv)), by=.(slice,test,g,id)]
+      args$test = tolower(args$test)
+      if (is.null(args.in$one.sided)) alt = "two.sided" else alt = ifelse(one.sided, "greater", "two.sided")
+      #transform for speedup
+      N = GAT.data[, uniqueN(slice)] #N for both slice/test
+      dvar = GAT.data$dv #vector for fast subsetting
+      gidx = GAT.data[.(1,1)][g!=args$within.null, which=T] #group 1 idx within a slice/test time, rest is group 2
+      sidx = GAT.data[.(1), which=T] #a single training time
+      ptest = lapply(seq_len(N), function(s) {
+        slice = sidx+length(sidx)*(s-1) #current training time indices
+        tidx = split(slice, GAT.data[slice,test]) #all test times
+        sapply(tidx, function(i) {
+          if (args$test == "wilcox") wilcox.test(x=dvar[i][gidx], y=dvar[i][-gidx], paired=args$paired, alternative=alt)$p.value
+          else t.test(x=dvar[i][gidx], y=dvar[i][-gidx], paired=args$paired, alternative=alt)$p.value
+        })
+      })
+      #remove null group, aggregate id and merge with ptest
+      GAT.data = GAT.data[g != args$within.null, .(dv=mean(dv)), by=.(slice,test)][, p:=p.adjust(unlist(ptest), method=args$adjust)]
+    } else { #no contrast but remove null group and aggregate
+      GAT.data = GAT[g != args$within.null, .(dv=mean(dv)), by=.(slice,test)]
     }
-  } else if (is.null(ticks)) { #only labels specified
-    ticks = labels
-  } 
-  if ( length(ggTheme$legend.title) == 0 ) { #create title for legend
-    ggTheme$legend.title = element_text(face="bold", size=max(ggTheme$axis.title.x$size, ggTheme$axis.title.y$size))
+  } else { #no grouping / contrast, id does not matter
+    GAT.data = GAT[, .(dv=mean(dv)), by=.(slice,test)]
   }
+  #undo changes to GAT
+  setnames(GAT, old="dv", new=dv)
+  if ("id" %in% names(GAT)) setnames(GAT, "id", idvar)
+  if ("g" %in% names(GAT)) setnames(GAT, "g", groupvar)
+  #create timeAxis
+  npoints = GAT.data[, uniqueN(slice)] #number of points on axis
+  if (!is.null(range)) { #replace slice number with time stamp
+    timestep = diff(range)/npoints
+    timepoints = seq(range[1], range[2], by=timestep)[-(npoints+1)] #left aligned
+    GAT.data[, ':=' (slice = timepoints[ findInterval(slice, unique(slice)) ], 
+                     test = timepoints[ findInterval(test, unique(test)) ])]
+  }
+  #create labels/ticks if any are non-NULL
+  if ( !is.null(c(labels, ticks)) ) {
+    tVals = GAT.data[, unique(slice)]
+    if (length(labels) == 1) labels = tVals[ seq(1,npoints,labels) ] #step size defined
+    if (length(ticks) == 1) ticks = tVals[ seq(1,npoints,ticks) ] #step size defined
+    if (is.null(labels)) labels = ticks
+    if (is.null(ticks)) ticks = labels
+    if (length(ticks) != length(labels)) {
+      tmp = ticks
+      tmp[ !ticks %in% labels ] = ""
+      labels = tmp
+    }
+  }
+  #set colour bar settings
   if (showBar) {
     if ( !is.character(ggTheme$legend.position) || ggTheme$legend.position == "none" ) {
       ggTheme = ggTheme + theme(legend.position="right")
     }
     if ( is.null(args.in$barwidth) ) args.in$barwidth = .7
     if ( is.null(args.in$barheight) ) args.in$barheight = 20
-    if ( is.null(args.in$nbin) ) args.in$nbin = diff(limits)*colNum
+    if ( is.null(args.in$nbin) ) args.in$nbin = colNum
     if ( is.null(args.in$barticks) ) args.in$barticks = F
   } else { #don't show colorbar
     ggTheme = ggTheme + theme(legend.position="none") 
   }
-  p = ggplot(data=GAT.data, aes(x=tTest, y=tTrain)) +
-    geom_raster(aes(fill=AUC), interpolate=smooth) + 
-    scale_fill_gradientn(colours=colorRampPalette(colScheme)( diff(limits) * colNum ), 
-                         limits=c(limits[1],limits[2]+.001), breaks=seq(limits[1], limits[2], 0.1),
-                         guide=guide_colorbar(bardwidth=args.in$barwidth, barheight=args.in$barheight, 
-                                              ticks=args.in$barticks, nbin=args.in$nbin)) +
-    scale_y_continuous(breaks=ticks, labels=labels, expand=c(0,0)) +
-    scale_x_continuous(breaks=ticks, labels=labels, expand=c(0,0)) +
-    annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=5) +
+  p = ggplot(data=GAT.data, aes(x=test, y=slice)) + 
+    geom_raster(aes(fill=dv), interpolate=smooth) + 
+    annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=txtsize) +
     labs(x=xlab, y=ylab, fill=legend) + ggTheme
-  if (contrast) p = p + stat_contour(aes(z=p), col="black", breaks=args$decode.test$alpha)
-  if ( onset && xrange[1] < (0 - diff(timepoints[1:2])) ) {
+  if (!is.null(limits)) {
+    p = p + scale_fill_gradientn(colours=colorRampPalette(colScheme)(colNum), limits=c(limits[1],limits[2]),
+                                 guide=guide_colorbar(bardwidth=args.in$barwidth, barheight=args.in$barheight, 
+                                                      ticks=eval(args.in$barticks), nbin=args.in$nbin))
+  } else { #auto limits
+    p = p + scale_fill_gradientn(colours=colorRampPalette(colScheme)(colNum),
+                                 guide=guide_colorbar(bardwidth=args.in$barwidth, barheight=args.in$barheight, 
+                                                      ticks=eval(args.in$barticks), nbin=args.in$nbin))
+  }
+  if ( !is.null(c(labels, ticks)) ) {
+    p = p + scale_y_continuous(breaks=ticks, labels=labels, expand=c(0,0)) +
+      scale_x_continuous(breaks=ticks, labels=labels, expand=c(0,0))
+  } else {
+    p = p + scale_y_continuous(expand=c(0,0)) + scale_x_continuous(expand=c(0,0))
+  }
+  if (contrast) p = p + stat_contour(aes(z=p), col=contrast.col, breaks=args$alpha)
+  if ( onset && GAT.data[, min(slice) < 0] )  {
     p = p + geom_vline(xintercept=0 , linetype="dashed", size=0.1) +
       geom_hline(yintercept=0 , linetype="dashed", size=0.1)
   }
@@ -358,14 +412,26 @@ plot.ERP <- function(data, multi.layout=NULL, butterfly=F, columns=NULL, colours
   #colours: if butterfly, colour for each channel, else colour for each outcome
   #rest: see plot.decode
   .eval_package("ggplot2", load=T)
-  data = data.check( copy(data) )
+  data = data.check(data)
   if (is.null(columns)) columns = setdiff( names(data), key(data) )
   n = ifelse(butterfly, length(columns), data[, uniqueN(outcome)])
   if (is.null(colours) && n <= 5) colours = c("#0072BD", "#D95319", "#EDB120", "#7E2F8E", "#77AC30")[1:n]
-  if (is.null(multi.layout)) data[, subject := 0] #aggregate over subjects
   if (butterfly && legend == "Class") legend = "Channel"
   #aggregate ERP for each channel:
-  ERP = data[, lapply(.SD, mean), .SDcols=columns, by=.(subject,sample,outcome)]
+  if (is.null(multi.layout)) { #aggregate over subjects
+    ERP = data[, lapply(.SD, mean), .SDcols=columns, by=.(sample,outcome)]
+    if (!butterfly) { #aggregate the channels
+      ERP = ERP[, .(sample,outcome,erp=ERP[, rowMeans(.SD), .SDcols=columns])]
+    }
+  } else {
+    ERP = data[, lapply(.SD, mean), .SDcols=columns, by=.(subject,sample,outcome)]
+    if (!butterfly) { #aggregate the channels
+      ERP = ERP[, .(subject,sample,outcome,erp=ERP[, rowMeans(.SD), .SDcols=columns])]
+    }
+  }
+  if (butterfly) { #each channel individually
+    ERP = melt(ERP, measure.vars=columns, value.name="erp", variable.name="channel")
+  }
   npoints = ERP[, uniqueN(sample)] #number of points on xAxis
   if (!is.null(xrange)) { #replace slice number with time stamp
     timestep = diff(xrange)/npoints
@@ -406,14 +472,9 @@ plot.ERP <- function(data, multi.layout=NULL, butterfly=F, columns=NULL, colours
       if (!is.null(ylabels)) p = p + scale_y_continuous(breaks=yticks, labels=ylabels)
     }
     if (!is.null(xlabels)) p = p + scale_x_continuous(breaks=xticks, labels=xlabels, expand=c(0,0))
-    if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dotted", size=0.1)
+    if (!is.null(vline)) p = p + geom_vline(xintercept=vline , linetype="dashed", size=0.1)
     if (nzchar(txt)) p = p + annotate("text", x=txtpos[1], y=txtpos[2], label=txt, col=txtcol, size=txtsize)
     return(p)
-  }
-  if (butterfly) { #each channel individually
-    ERP = melt(ERP, measure.vars=columns, value.name="erp", variable.name="channel")
-  } else { #aggregate the channels
-    ERP = ERP[, .(subject,sample,outcome,erp=ERP[, rowMeans(.SD), .SDcols=columns])]
   }
   if (is.null(multi.layout)) {
     return( ggLineplot(ERP, txt) )
