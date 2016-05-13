@@ -164,7 +164,7 @@ SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
   return(SSDdata)
 }
 
-SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, nCores=list()) {
+SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, patterns=F, nCores=list()) {
   ## Spatio-Spectral decomposition (SSD), cf. Nikulin et al. 2011 for  extraction of neuronal oscilations with improved SNR
   #INPUT ---
   #SSDdata: list of 2 (1: signal, 2: noise), output of SSD.filter
@@ -219,7 +219,7 @@ SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, nCores=l
     Cs_white = M %*% Cs %*% t(M) #whitened C signal
     WD = eigen(Cs_white, symmetric=T)
     WD$vectors = t(M) %*% WD$vectors #unwhiten the filters
-    if (denoise) WD$C = Cs #add C for pattern matrix
+    if (denoise || patterns) WD$C = Cs #add C for pattern matrix
     return(WD)
   }
   
@@ -235,6 +235,7 @@ SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, nCores=l
   if (length(subIDs)<2) WD = list(WD)
   r = q #fixed num components for all subjects if a constant >= 1
   rank = c() #save ranks
+  if (patterns) pattern_list = list() #save patterns
   #project the data outside foreach to print feedback in case of auto-selection
   data = rbindlist( lapply(seq_along(subIDs), function(i) {
     W = WD[[i]]$vectors
@@ -243,16 +244,19 @@ SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, nCores=l
       r = max(1, sum( lambda >= q*IQR(lambda)+quantile(lambda, probs=.75) ))
       cat( "Subject ", subIDs[i], ": auto-selected ", r, " components.\n", sep="" )
     }
-    rank <<- c(rank, r)
     X = sublist[[i]]$Xs %*% W[,1:r] #project data onto filters
-    if (denoise) { #low-rank factorization
+    if (denoise || patterns) { #low-rank factorization
+      rank <<- c(rank, r)
       A = WD[[i]]$C %*% W %*% solve(t(W) %*% WD[[i]]$C %*% W) #pattern matrix
-      X = X %*% t(A[,1:r]) #project X back to measurement space (with reduced rank)
+      if (patterns) pattern_list[[ as.character(subIDs[i]) ]] <<- A[,1:r]
+      if (denoise) X = X %*% t(A[,1:r]) #project X back to measurement space (with reduced rank)
     } #else: X remains in component space
     cbind(SSDdata$signal[.(subIDs[i]), .SD, .SDcols=!nm], X)
   }), fill=T ) #fill if auto-selection yielded different num components and no denoising is performed
   
   parBackend(cl) #close backend (if initialized by function) and print final time
-  return( setattr(data.check(data), "ranks", rank)[] )
+  if (denoise) setattr(data, "ranks", rank)[]
+  if (!patterns) return( data.check(data) )
+  return( list(data=data.check(data), patterns=pattern_list) )
 }
 
