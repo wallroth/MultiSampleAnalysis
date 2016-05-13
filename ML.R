@@ -1,6 +1,7 @@
 #ML DT
 
-decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0, permutations=1, CV=NULL, nCores=NULL, ...) {
+decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0, permutations=1, CV=NULL, 
+                   verbose=T, lean=F, nCores=NULL, ...) {
   ## the heart of the decoding package: decode with (repeated) k-fold CV (within/across/between subjects)
   #INPUT ---
   #method: one of c("within","across","between")
@@ -19,6 +20,8 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   #              of true fits, i.e. a value of 1 means as many permutations as there 
   #              are true fits; 2 means twice as many, etc.; 0 = no permutations
   #CV: output from fold.idx to control the cross validation scheme
+  #verbose: if True, print fold iteration and time
+  #lean: if True, output will not contain correct/incorrect (classification) / N (regression) columns
   #nCores: number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
@@ -47,6 +50,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   args$model.fit[c("center","scale")] = lapply(args$model.fit[c("center","scale")], eval) #evaluate logicals
   nm = setdiff( names(data), key(data) )
   args$classification = args$model.fit$model != "REG"
+  args$model.fit$lean = lean
   if (args$classification) {
     .eval_package("pROC")
     args$model.fit$multiClass = data[, uniqueN(outcome) > 2]
@@ -88,7 +92,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
          (is.null(CV) || CV[, .(N=uniqueN(trial)), by=.(subject,fold)][, min(N) <= 2]), T, train.allow )
   }
   args = args[!names(args) %in% c("pass","data.permute_classes")] #no longer needed
-  args$within = method == "within"
+  args$within = method == "within" && data[, uniqueN(subject) > 1]
   if ( nchar(args$slice.idx$window) > 0 ) { #get slice indices
     allequal = data[, .N, by=.(subject,trial)][, all(diff(N) == 0)] #do all trials have the same number of samples
     if (!allequal) stop( "Assumption of non-varying sample numbering across subjects is violated." )
@@ -220,7 +224,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     }
     fold_performance = list() #collect fold results
     for ( foldnum in folds[, unique(fold)] ) { #iterate the folds
-      cat("Fold",foldnum)
+      if (verbose) cat("Fold",foldnum)
       #subset data into test/training sets:
       testIdx = dataInfo[ folds[fold == foldnum, .(subject, trial)], nomatch=0, which=T ]
       trainIdx = dataInfo[!testIdx, which=T] #mutually exclusive data sets
@@ -270,7 +274,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
                               if (GAT) fit.GAT(slice) else fit.slice(slice)
                             }
       if ( truelength(performance) == 0 ) alloc.col(performance, 10) #fix to 0 allocated columns error when parallelized without slicing
-      set(performance, j="label", value="true") #add label info
+      if (permutations > 0) set(performance, j="label", value="true") #add label info
       
       #fit model(s) with shuffled labels:
       for ( perm in seq_len(permutations) ) { #repeat for number of permutations
@@ -292,7 +296,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
         performance = rbind(performance, set(perform_rand, j="label", value="random")) #bind to existing performance DT
       }
       fold_performance[[foldnum]] = performance #add to fold list
-      cat(" | Time elapsed (mins):", round((proc.time()[3]-runtime)/60,2), "\n")
+      if (verbose) cat(" | Time elapsed (mins):", round((proc.time()[3]-runtime)/60,2), "\n")
     } #end of fold
     run_performance[[run]] = rbindlist(fold_performance, idcol=if (length(fold_performance)>1) "fold") #bind to one DT
   } #end of run
@@ -300,12 +304,13 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   performance = rbindlist(run_performance, idcol=if (repetitions>1) "run") #bind to one DT
   keys = intersect( c("subject","slice","test","run","label","fold"), names(performance) ) #key existing info columns
   setcolorder( performance, union(keys, names(performance)) ) #re-arrange column order
-  setkeyv(performance[, label := factor(label, levels=c("true","random"))], keys) #sort by key order
+  if (permutations>0) performance[, label := factor(label, levels=c("true","random"))]
+  setkeyv(performance, keys) #sort by key order
   parBackend(cl) #close backend (if initialized by function) and print final time
   return( setattr(performance, "call", match.call())[] )
 }  
 
-decode.test <- function(result, test="wilcox", one.sided=T, dv="AUC", within.var="label", within.null="random",
+decode.test <- function(result, test="wilcox", one.sided=T, paired=T, dv="AUC", within.var="label", within.null="random",
                         between="slice", id="subject", adjust="fdr", alpha=0.05, bootstrap=F, iterations=1000) {
   ## significance testing and permutation confidence intervals of decoding result
   #INPUT ---
@@ -314,6 +319,7 @@ decode.test <- function(result, test="wilcox", one.sided=T, dv="AUC", within.var
   #      NOTE: care that fold splits or permutations within folds were not repeated, otherwise
   #            the variance can be made arbitrarily small which will then lead to grossly underestimated p-values
   #one.sided: if True, alternative hypothesis is set to "greater", otherwise "two.sided"
+  #paired: if True, test is paired, i.e. observations for within.var are matched
   #dv: dependent variable, column with the performance score; required
   #within.var: pair to compare, e.g. column with the labels (true vs. random); required
   #within.null: within.var's value that represents the null distribution (used to compute the CIs with)
@@ -340,8 +346,8 @@ decode.test <- function(result, test="wilcox", one.sided=T, dv="AUC", within.var
   if (test != "none") { #compute p-values
     hypothesis = ifelse(one.sided, "greater", "two.sided")
     ptab = aggres[, {
-      if (test == "wilcox") .(p = wilcox.test(dv ~ wv, paired=T, alternative=hypothesis)$p.value)
-      else .(p = t.test(dv ~ wv, paired=T, alternative=hypothesis)$p.value)
+      if (test == "wilcox") .(p = wilcox.test(dv ~ wv, paired=paired, alternative=hypothesis)$p.value)
+      else .(p = t.test(dv ~ wv, paired=paired, alternative=hypothesis)$p.value)
     }, by=bv]
     if (tolower(adjust) != "none") ptab[, p.adj:=p.adjust(p, method=adjust)]
   }
@@ -435,7 +441,7 @@ model.fit <- function(train, test=NULL, model="LogReg", center=T, scale=T, ...) 
     setattr( fit, "performance", data.table(AUC = auc, correct = sum(diag(CM)), incorrect = sum(CM[upper.tri(CM)], CM[lower.tri(CM)])) )
   } else { #regression
     resids = test.outcome - preds
-    R2 = sum(resids^2)/sum((test.outcome-mean(test.outcome))^2) #SSE/SST
+    R2 = sum(resids^2)/sum((test.outcome-mean(train.outcome))^2) #SSE/SST
     #1 - [(n-1)/(n-p)] * (SSE/SST) #adjustment doesn't work when n < p?
     setattr( fit, "performance", data.table(RMSE = sqrt(mean(resids^2)), R2=1-R2, N=length(resids)) )
   }
@@ -487,7 +493,7 @@ fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials") {
     } else { #fold split
       if (n.folds > length(subject)) stop( "Cannot have more folds than subjects." )
       .(fold = sample(cut(subject, breaks=n.folds, labels=F, include.lowest=T)), subject = subject)
-    } }], c("fold", "subject"))[data[, .(trial=unique(trial)), by=subject]]
+    } }], c("fold", "subject"))[data[, .(trial=unique(trial)), by=subject], on="subject"]
   }
   return( setkeyv(folds, c("subject","fold","trial"))[] )
 }
@@ -579,12 +585,14 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
     } else {
       auc = pROC::auc(test.outcome, preds, direction="<", algorithm=3)[1]
     }
+    if (args$lean) return( list(AUC=auc) )
     CM = table(preds, test.outcome) #confusion matrix
     return( list(AUC = auc, correct = sum(diag(CM)), incorrect = sum(CM[upper.tri(CM)], CM[lower.tri(CM)])) )
   } else { #regression
     resids = test.outcome - preds
-    R2 = sum(resids^2)/sum((test.outcome-mean(test.outcome))^2) #SSE/SST
+    R2 = sum(resids^2)/sum((test.outcome-mean(train.outcome))^2) #SSE/SST
     #1 - [(n-1)/(n-p)] * (SSE/SST) #adjustment doesn't work when n < p?
+    if (args$lean) return( list(RMSE = sqrt(mean(resids^2)), R2=1-R2) )
     return( list(RMSE = sqrt(mean(resids^2)), R2=1-R2, N=length(resids)) )
   }
 }
