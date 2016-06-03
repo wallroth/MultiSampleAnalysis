@@ -216,7 +216,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   run_performance = list() #collect run results
   for ( run in seq_len(repetitions) ) {
     runtime = proc.time()[3]
-    if (repetitions > 1) cat("Run",run,"\n")
+    if (repetitions > 1 && verbose) cat("Run",run,"\n")
     if (is.null(CV)) { #obtain the folds for the CV scheme:
       folds = do.call( fold.idx, modifyList(args$fold.idx, list(data=data)) )
     } else {
@@ -512,6 +512,7 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   keys = key(data)
   permuted = data[sample == sample[1], {
     classes = table(outcome)
+    classes = classes[classes>0] #in case of empty factor levels
     n = length(classes)
     success = F
     while ( !success ) {
@@ -519,7 +520,11 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
       #check how many class labels switched positions
       success = all( sapply(1:n, function(i) { #iterate class labels
         #range in which permutation was successful:
-        range = floor(classes[i]/n - classes[i]/n*tol):ceiling(classes[i]/n + classes[i]/n*tol)
+        half = classes[i]/n
+        if (half > sum(classes[-i])/n) { #in case of imbalance
+          half = classes[i]-sum(classes[-i])/n
+        }
+        range = floor(half - half*tol):ceiling(half + half*tol)
         sum( which(outcome == names(classes)[i]) %in% which(tmp == names(classes)[i]) ) %in% range
       }) )
       #make sure even with tol=1 the shuffle is not identical to the true labels:
