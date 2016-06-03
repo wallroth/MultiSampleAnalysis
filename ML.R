@@ -295,13 +295,15 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
         if ( truelength(perform_rand) == 0 ) alloc.col(perform_rand, 10) #fix to 0 allocated columns error when parallelized without slicing
         performance = rbind(performance, set(perform_rand, j="label", value="random")) #bind to existing performance DT
       }
+      performance[, fold := foldnum]
       fold_performance[[foldnum]] = performance #add to fold list
       if (verbose) cat(" | Time elapsed (mins):", round((proc.time()[3]-runtime)/60,2), "\n")
     } #end of fold
-    run_performance[[run]] = rbindlist(fold_performance, idcol=if (length(fold_performance)>1) "fold") #bind to one DT
+    run_performance[[run]] = rbindlist(fold_performance) #bind to one DT
   } #end of run
   ### END FITTING ###
   performance = rbindlist(run_performance, idcol=if (repetitions>1) "run") #bind to one DT
+  if (folds[, uniqueN(fold)==1]) performance[, fold:=NULL] #remove obsolete column
   keys = intersect( c("subject","slice","test","run","label","fold"), names(performance) ) #key existing info columns
   setcolorder( performance, union(keys, names(performance)) ) #re-arrange column order
   if (permutations>0) performance[, label := factor(label, levels=c("true","random"))]
@@ -510,13 +512,15 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   keys = key(data)
   permuted = data[sample == sample[1], {
     classes = table(outcome)
+    n = length(classes)
     success = F
+    browser()
     while ( !success ) {
       tmp = sample(outcome) #shuffle
       #check how many class labels switched positions
-      success = all( sapply(1:length(classes), function(i) { #iterate class labels
+      success = all( sapply(1:n, function(i) { #iterate class labels
         #range in which permutation was successful:
-        range = floor(classes[i]/2 - classes[i]/2*tol):ceiling(classes[i]/2 + classes[i]/2*tol)
+        range = floor(classes[i]/n - classes[i]/n*tol):ceiling(classes[i]/n + classes[i]/n*tol)
         sum( which(outcome == names(classes)[i]) %in% which(tmp == names(classes)[i]) ) %in% range
       }) )
       #make sure even with tol=1 the shuffle is not identical to the true labels:
