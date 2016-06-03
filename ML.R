@@ -514,7 +514,6 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
     classes = table(outcome)
     n = length(classes)
     success = F
-    browser()
     while ( !success ) {
       tmp = sample(outcome) #shuffle
       #check how many class labels switched positions
