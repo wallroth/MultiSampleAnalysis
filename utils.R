@@ -1,25 +1,4 @@
-library(data.table)
-#modifications are done globally; use copy(dt) to make local modifications
-#index a column via character with get(..)
-#prevent dropping of columns by specifying in by: x[ outcome == "A" , lapply(.SD, mean), .SDcols=4:9, by=.(trial, outcome) ]
-#CJ to select multiple values: dat[CJ(1:2, 1:3)]
-#instead of dat[x==1 | y ==3] better to: dat[.(1,3)]
-#select by multiple keys: dat[.(1:5, 5, "B"), nomatch=0]
-#last row: x[.N], second last: x[.N-1]
-#x[,.N] returns the number of rows
-# y[, lapply(.SD, scale), .SDcols = -(1:3) ] #apply scale directly
-# assign: y[, (names(y)[-c(1:3)]) := lapply(.SD, scale), .SDcols = -(1:3) ]
-# scale( y[, .SD, .SDcols = -(1:3) ] ) #get matrix output with attributes
-# insert column-wise: for ( col in 1:ncol(yy) ) set(y, i=NULL, j=colnames(yy)[col], yy[,col])
-# select non-key columns: setdiff(names(x),key(x))
-# DT[c("a","b"),sum(v),by=.EACHI]   # sum for two groups of v
-# DT[,sum(v),by=.(y%%2)]   # by expression
-#get the actual row index: data[, .I[sample %in% baseline] ]
-#data[.(c(1,2,1),c(2,3,5))] subset for subject 1 trial 2 and 5 and for subject 2 trial 3
-#data[.(unique(subject),1)] subset for every subject trial 1
-
-
-read.data <- function(path=".", pattern="*.csv", nCores=NULL, ...) {
+read.data <- function(path=".", pattern="*.csv", nCores=list(), ...) {
   ## function to read in data files while also setting the necessary info attributes
   #INPUT ---
   #path: string specifying the location (folder) with the data files
@@ -28,8 +7,8 @@ read.data <- function(path=".", pattern="*.csv", nCores=NULL, ...) {
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
   #...: further arguments to fread and to data.setinfo
-  #     important arguments are 'samples' (which has to be constant for all data sets) 
-  #     and 'outcome' which can only be specified as an integer that indicates the column
+  #     important arguments are '.samples' (which has to be constant for all data sets) 
+  #     and '.outcome' which can only be specified as an integer that indicates the column
   #     with the outcome values for each data file. If no such column is present you can
   #     specify NULL and add the outcome afterwards by looping the sets.
   #RETURNS ---
@@ -60,11 +39,14 @@ read.data <- function(path=".", pattern="*.csv", nCores=NULL, ...) {
 is.float <- function(x) if (is.numeric(x)) any(x %% 1 > 0) else FALSE
 
 data.setinfo <- function(data, .outcome=NULL, .subject=NULL, .samples=NULL, .trials=NULL, strip=F, asFactor=T) {
+  ## sets the required info columns in data
+  #INPUT ---
   #outcome: character or number specifying a column, or vector corresponding to trial number or vector corresponding to nrow
   #subject: character or integer specifying a column, or numeric (non-integer) specifying the subject id
   #samples: character or integer specifying a column, or numeric (non-integer) specifying the number of samples per trial
   #trials: character or integer specifying a column, or numeric (non-integer) specifying the number of samples per trial
   #strip: logical, if True, non-floating number columns (excluding the info columns) are removed from data
+  #RETURNS: data with the info columns and keys set 
   data = as.data.table(data) #create a copy
   #begin by checking for non-NULL input:
   if ( is.character(.subject) || is.integer(.subject) ) { #supplied as column name/number
@@ -180,7 +162,7 @@ data.subset_classes <- function(data, classes) {
   return( data.check(data[ outcome %in% classes ][, outcome := if (is.factor(outcome)) ordered(outcome) else outcome ])[] )
 }
 
-data.merge_classes <- function(data, classes, new.labels=NULL, copy=F) {
+data.merge_classes <- function(data, classes, new.labels=NULL, copy=T) {
   #classes: vector specifying the outcome values to merge or list of vectors for multiple merges
   #         e.g. c("A","B") to merge the outcomes A and B;
   #         e.g. list(c("A","B"),c("C","D")) to merge A and B, and also C and D
@@ -201,6 +183,7 @@ data.merge_classes <- function(data, classes, new.labels=NULL, copy=F) {
 }
 
 data.match_baseline <- function(data, baseline, normalize=F, remove=F, method="forward-reverse") {
+  ## trial-wise matching of a baseline period to the remaining trial samples
   #INPUT ---
   #baseline: vector of sample numbers to align as baseline condition against the rest
   #normalize: if True, demean the rest with the baseline period
@@ -234,15 +217,16 @@ data.match_baseline <- function(data, baseline, normalize=F, remove=F, method="f
 }
 
 data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, min.var=0, plot=F) {
-  #detect outlier trials based on variance criterion, i.e. trial's whose averaged channel-wise variance
-  #exceeds a threshold are removed from the data. threshold formula: Q+C*IQR
+  ## detect outlier trials based on variance criterion, i.e. trial's whose averaged channel-wise variance
+  ## exceeds a threshold are removed from the data. threshold formula: Q+C*IQR
+  #INPUT ---
   #threshold: can be manually set and thus fixed for all subjects
-  #Q represents a quantile of the trial variance values, e.g. Q=50=median
-  #IQR represents a range between two quantiles of the variance, i.e. IQR=90=range between 5% and 95% quantiles
-  #C is a constant that multiplies the inter-quantile range
+  #Q: a quantile of the trial variance values, e.g. Q=50=median
+  #IQR: a range between two quantiles of the variance, i.e. IQR=90=range between 5% and 95% quantiles
+  #C: a constant that multiplies the inter-quantile range
   #min.var: minimum variance a trial has to exceed before it is considered as outlier
   #plot: if True, variance, thresholds and outliers are plotted per subject
-  #returns data with a summary attribute which lists the number of outliers, thresholds and median variance per subject
+  #RETURNS: data with a summary attribute which lists the number of outliers, thresholds and median variance per subject
   data = data.check(data)
   nm = setdiff( names(data), key(data) )
   #compute global variance values
@@ -279,6 +263,8 @@ data.remove_outliers <- function(data, threshold=NULL, Q=50, IQR=90, C=3, min.va
 }
 
 slice.idx <- function(n, window, overlap=0, imbalance="ignore") {
+  ## helper to retrieve indices for slicing of time series data
+  #INPUT ---
   #n: number of samples per trial or vector specifying min/max sample number
   #window: number of samples per slice that are contributed by each trial
   #overlap: >= 0 number of overlapping samples per slice, i.e. to have a sliding time window
@@ -417,10 +403,12 @@ data.simulate <- function(n.subjects=1, n.outcomes=2, n.channels=60, n.trials=50
   return( setattr(data, "properties", props)[] )
 }
 
-parBackend <- function(cores=NULL, ...) {
+parBackend <- function(cores=NULL, code="decode.R", ...) {
   ## initialize or shut down a parallel backend
+  #INPUT ---
   #cores: numeric specifying the number of cores to initiate for parallel backend; NULL defaults to available cores;
   #       or a cluster object to shut down; or an empty list to take no action (to leave a cluster active)
+  #code: filepath to "decode.R" for sourcing to the initialized workers
   #...: pass the argument 'required' to specify number of jobs (internally used by functions)
   #RETURNS: the cluster object (list) or nothing (if shut down) or passes the empty list without action
   .eval_package("foreach", load=T)
@@ -428,10 +416,12 @@ parBackend <- function(cores=NULL, ...) {
     start.time = proc.time()[3] #includes time spent on initialization of the cluster
     cores = min( min( cores, parallel::detectCores() ), list(...)$required ) #sanity check user input 
     #start up the CPU cluster
+    # expr = as.expression({ source(code, chdir=T); require(data.table) })
     cluster = parallel::makeCluster(cores) #create
     doParallel::registerDoParallel(cluster) #register
     #TEMP export functions to cluster
-    parallel::clusterEvalQ( cluster, expr={ source("decode.R"); require(data.table) } )
+    parallel::clusterExport(cluster, "code", envir=environment())
+    parallel::clusterEvalQ(cluster, expr={ source(code, chdir=T); require(data.table) })
     cat( "Distributing", list(...)$required, "jobs to", cores, "workers . . .\n" )
     return( setattr(cluster,"start.time",start.time) ) #return the cluster with time attribute
   } else if ( length(cores) > 0 && getDoParRegistered() ) { #active cluster to shut down
@@ -483,6 +473,7 @@ parBackend <- function(cores=NULL, ...) {
 }
 
 
-
+### ON SOURCE:
+.eval_package("data.table", load=T)
 
 

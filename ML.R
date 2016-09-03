@@ -1,7 +1,7 @@
 #ML DT
 
-decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0, permutations=1, CV=NULL, 
-                   verbose=T, lean=F, nCores=NULL, ...) {
+decode <- function(data, method="within", decompose="none", GAT=F, iterations=1, permutations=1, CV=NULL, 
+                   verbose=T, lean=F, nCores=list(), ...) {
   ## the heart of the decoding package: decode with (repeated) k-fold CV (within/across/between subjects)
   #INPUT ---
   #method: one of c("within","across","between")
@@ -10,12 +10,12 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   #                i.e. train and test set contain trials of every subject in equal numbers
   #        between: data of multiple subjects is separated into train and test set
   #                 i.e. train and test set contain trials of different subjects
-  #decompose: decomposition method to use, one of c("CSP","SpecCSP","SPoC")
+  #decompose: decomposition method to use, one of c("CSP","SPoC")
   #GAT: if True, extend to "Generalization across time" procedure: 
   #     additionally to the standard decoding approach, the training time model fits are 
   #     applied to all other slices (test times) to generalize the information at one time point to others;
   #     the GAT diagonal (train time = test time) corresponds to the default decoding scheme (i.e. GAT=F)
-  #repetitions: number of repetitions of the k-fold CV, a value >= 0
+  #iterations: number of iterations of the k-fold CV, a value >= 1
   #permutations: number of permutations on each fold, corresponds to the number
   #              of true fits, i.e. a value of 1 means as many permutations as there 
   #              are true fits; 2 means twice as many, etc.; 0 = no permutations
@@ -25,6 +25,8 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   #nCores: number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
+  #"...": further arguments (if applicable) to fold.idx, slice.idx, data.permute_classes, 
+  #       model.fit and respective modelling function, decompose.CSP|SPoC, data.project
   #RETURNS ---
   #a DT showing the performance scores per subject/slice/test/label/run/fold (whichever is applicable)
   .eval_package(c("foreach","fastmatch"), load=T)
@@ -32,9 +34,9 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   method = tolower(method); decompose = toupper(decompose)
   if ( !method %in% c("within","across","between") ) stop( "Undefined decoding method. Options are 'within', 'across' and 'between'." )
   if ( !decompose %in% c("NONE","CSP","SPOC") ) stop( "Undefined decomposition method. Options are 'CSP' and 'SPoC'." )
-  if ( !is.null(CV) && repetitions > 0 ) {
-    cat( "Ignoring the requested number of repetitions because a predefined CV scheme is supplied.\n" )
-    repetitions = 0
+  if ( !is.null(CV) && iterations > 1 ) {
+    cat( "Ignoring the requested number of iterations because a predefined CV scheme is supplied.\n" )
+    iterations = 1
   }
   data = data.check(data)
   #retrieve arguments for various functions later down the line (exclude function name and data from evaluation)
@@ -42,34 +44,41 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   args = do.call( .eval_ellipsis, modifyList(args.in, list(funStr=c("fold.idx","slice.idx","data.permute_classes","model.fit"))) )
   args$pass = args.in[ !names(args.in) %in% c( names(formals(decode)), do.call(c, lapply(args, names)) ) ] #additional arguments
   ## evaluate model specification once to reduce overhead from multiple model.fit calls ##
-  models = c("Reg", "LogReg", "SVM", "LDA", "SDA") #currently implemented models
-  args$model.fit$model = toupper(args$model.fit$model)
-  if ( !args$model.fit$model %in% toupper(models) ) {
-    stop( "Undefined model selected. Current options are: ", paste(models, collapse=", "), "." ) 
-  }
-  args$model.fit[c("center","scale")] = lapply(args$model.fit[c("center","scale")], eval) #evaluate logicals
   nm = setdiff( names(data), key(data) )
-  args$classification = args$model.fit$model != "REG"
+  args$model.fit[c("center","scale")] = lapply(args$model.fit[c("center","scale")], eval) #evaluate logicals
   args$model.fit$lean = lean
-  if (args$classification) {
-    .eval_package("pROC")
+  #non-numeric or less than 10 unique values = classification
+  args$model.fit$classification = !is.numeric(data$outcome) || data[, uniqueN(outcome) <= 10]
+  if (args$model.fit$classification) {
+    .eval_package("pROC") #for AUC
     args$model.fit$multiClass = data[, uniqueN(outcome) > 2]
     if (!is.ordered(data$outcome)) setkeyv( data[, outcome:=ordered(outcome)], setdiff(names(data), nm) )
   }
-  if ( args$model.fit$model %in% c("REG", "LOGREG", "SVM") ) {
-    .eval_package("LiblineaR")
-    if ( is.null(args.in$type) ) { #set type if none specified
-      if ( args$model.fit$model == "LOGREG" ) args$pass$type = 0 #primal L2 log reg
-      else if ( args$model.fit$model == "SVM" ) args$pass$type = 2 #primal L2 SVM
-      else args$pass$type = 11 #primal L2 reg
+  if (!is.function(args$model.fit$model)) {
+    models = c("Reg", "LogReg", "SVM", "LDA", "SDA") #currently implemented models
+    args$model.fit$model = toupper(args$model.fit$model)  
+    if ( !args$model.fit$model %in% toupper(models) ) {
+      stop( "Undefined model selected. Current options are: ", paste(models, collapse=", "), ". ",
+            "Alternatively, you may directly supply the modeling function you wish to use." )
     }
-    funargs = as.list( formals(LiblineaR::LiblineaR) )
-  } else if ( args$model.fit$model == "LDA" ) {
-    .eval_package("MASS")
-    funargs = list()
-  } else if ( args$model.fit$model == "SDA" ) { #shrinkage LDA
-    .eval_package("sda")
-    funargs = modifyList( as.list(formals(sda::sda)), list(verbose=F) )
+    if ( args$model.fit$model %in% c("REG", "LOGREG", "SVM") ) {
+      .eval_package("LiblineaR")
+      if ( is.null(args.in$type) ) { #set type if none specified
+        if ( args$model.fit$model == "LOGREG" ) args$pass$type = 0 #primal L2 log reg
+        else if ( args$model.fit$model == "SVM" ) args$pass$type = 2 #primal L2 SVM
+        else args$pass$type = 11 #primal L2 reg
+      }
+      funargs = as.list( formals(LiblineaR::LiblineaR) )
+    } else if ( args$model.fit$model == "LDA" ) {
+      .eval_package("MASS")
+      funargs = list()
+    } else if ( args$model.fit$model == "SDA" ) { #shrinkage LDA
+      .eval_package("sda")
+      funargs = modifyList( as.list(formals(sda::sda)), list(verbose=F) )
+    }
+  } else { #function input to model
+    funargs = as.list( formals(args$model.fit$model) )
+    if ("verbose" %in% names(funargs)) funargs$verbose = F
   }
   args$model.fit$fitfun = modifyList( funargs, args$pass[ match(names(args$pass), names(funargs), nomatch=0)>0 ], keep.null=T )
   ## end model evaluation ##
@@ -111,7 +120,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     args$decomp = lapply(c(tmp[[decompose.method]][-1], tmp$data.project[-c(1,2)]), eval) #evaluate non-empty arguments
     if (args$decomp$shrinkage) .eval_package("corpcor")
     args$decomp$CSP = decompose == "CSP"
-    if ( !args$classification && args$decomp$CSP ) stop( "CSP requires a classification problem." )
+    if ( !args$model.fit$classification && args$decomp$CSP ) stop( "CSP requires a classification problem." )
     if ( !args$decomp$CSP && args$slice.idx$window == 1 ) {
       stop( "SPoC requires more than 1 sample per trial to compute the within-trial covariance." )
     }
@@ -123,7 +132,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
       cat( "Deactivating scaling via SD because log-transformation of trial variance is set.\n" )
       args$model.fit$scale = F
     }
-    if ( args$classification && args$decomp$CSP ) { #class details not required for SPoC
+    if ( args$model.fit$classification && args$decomp$CSP ) { #class details not required for SPoC
       args$decomp$multiClass = args$model.fit$multiClass
       args$decomp$classes = levels(data$outcome)
     }
@@ -132,7 +141,6 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
       args$decomp$shrinkage = F
     }
   }
-  repetitions = repetitions + 1 #a single run equals 1 'repetition'
   dataMat = unname( as.matrix(data[, .SD, .SDcols=nm]) ) #transform data to matrix (measurements only)
   dataInfo = data[, .SD, .SDcols=!nm] #info columns DT with subset information
   slicelist = lapply(1:ncol(slices), function(i) { #pre-create slice idx list
@@ -214,9 +222,9 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
   }
   ### START FITTING ###
   run_performance = list() #collect run results
-  for ( run in seq_len(repetitions) ) {
+  for ( run in seq_len(iterations) ) {
     runtime = proc.time()[3]
-    if (repetitions > 1 && verbose) cat("Run",run,"\n")
+    if (iterations > 1 && verbose) cat("Run",run,"\n")
     if (is.null(CV)) { #obtain the folds for the CV scheme:
       folds = do.call( fold.idx, modifyList(args$fold.idx, list(data=data)) )
     } else {
@@ -302,7 +310,7 @@ decode <- function(data, method="within", decompose="none", GAT=F, repetitions=0
     run_performance[[run]] = rbindlist(fold_performance) #bind to one DT
   } #end of run
   ### END FITTING ###
-  performance = rbindlist(run_performance, idcol=if (repetitions>1) "run") #bind to one DT
+  performance = rbindlist(run_performance, idcol=if (iterations>1) "run") #bind to one DT
   if (folds[, uniqueN(fold)==1]) performance[, fold:=NULL] #remove obsolete column
   keys = intersect( c("subject","slice","test","run","label","fold"), names(performance) ) #key existing info columns
   setcolorder( performance, union(keys, names(performance)) ) #re-arrange column order
@@ -383,7 +391,8 @@ model.fit <- function(train, test=NULL, model="LogReg", center=T, scale=T, ...) 
   #       available options are: "Reg", "LogReg", "SVM", "LDA", "SDA"
   #center: if True, data is centered during training
   #scale: if True, data is scaled during training
-  #note: the obtained parameters are used to also center/scale the test set
+  #...: further arguments to modelling function, e.g. LiblineaR
+  #NOTE: the obtained parameters are used to also center/scale the test set
   #RETURNS ---
   #list with elements:
   #fit: model fit with the respective list structure
@@ -450,11 +459,17 @@ model.fit <- function(train, test=NULL, model="LogReg", center=T, scale=T, ...) 
   return(fit)
 }
 
-fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials") {
+fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials", random=T) {
+  ## creates a stratified CV scheme for convenient join operations (subset) with data
+  #all samples of a trial are assigned to the same fold
+  #INPUT ---
   #n.folds: number of folds, if between 0 and 1 regarded as percentage of data for test set; if NULL: LOO
   #n.classes: if outcome is a continous variable, n.classes should bet set to set the number of categories
   #           if outcome is a float, n.classes will default to 5 (=4 groups) if not specified
   #fold.type: trials|subjects - specifies if folds are built with trials or subject ids
+  #random: bool, if True, fold assignment is shuffled, otherwise in order of appearance (chronological)
+  #RETURNS ---
+  #a DT with the CV scheme with columns subject|fold|trial|(outcome)
   fold.type = tolower(fold.type)
   if ( !fold.type %in% c("trials","subjects") ) stop( "Undefined fold type. Options are 'trials' or 'subjects'." )
   data = data.check(data)
@@ -482,7 +497,12 @@ fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials") {
         folds = rep(0, length(outcome)) #fold vector
         for (i in 1:length(class.tab)) {
           num.reps = class.tab[i]%/%k #num times of class per fold
-          folds[ outcome==names(class.tab)[i] ] = c( sample(rep(1:k, num.reps)), sample(1:k, class.tab[i]%%k) ) #append if any are left
+          if (random) {
+            folds[ outcome==names(class.tab)[i] ] = c( sample(rep(1:k, num.reps)), sample(1:k, class.tab[i]%%k) ) #append if any are left
+          } else { #chronological order
+            rest = class.tab[i]%%k
+            folds[ outcome==names(class.tab)[i] ] = c( rep(1:k, each=num.reps), if (rest > 0) (k-rest+1):k )
+          }
         }
         .(fold = folds, trial = trial, outcome = outcome) #return
       }
@@ -494,14 +514,18 @@ fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials") {
       .(fold = 1, subject = sample( subject, size=round(length(subject)*n.folds) )) #return
     } else { #fold split
       if (n.folds > length(subject)) stop( "Cannot have more folds than subjects." )
-      .(fold = sample(cut(subject, breaks=n.folds, labels=F, include.lowest=T)), subject = subject)
+      if (random) {
+        .(fold = sample(cut(subject, breaks=n.folds, labels=F, include.lowest=T)), subject = subject)
+      } else {
+        .(fold = cut(subject, breaks=n.folds, labels=F, include.lowest=T), subject = subject)
+      }
     } }], c("fold", "subject"))[data[, .(trial=unique(trial)), by=subject], on="subject"]
   }
   return( setkeyv(folds, c("subject","fold","trial"))[] )
 }
 
 data.permute_classes <- function(data, tol=1, allow.identical=F) {
-  ## extracts class labels from data and permutes if requested
+  ## trial-wise permutation of the outcome (classes) in data
   #tol: the permutation success is verified by checking for each class if half the labels +/- tol * that
   #     have switched their position; e.g. with 100 trials for a class, 50 of those have to be switched for perfect permutation
   #     if tol = 0, exactly 50 have to be switched; if tol = 1, it can be any number (1:100)
@@ -571,7 +595,12 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   if (args$scale) scale = attr(train, "scaled:scale")
   else scale = F
   #fit the model:
-  if ( args$model %in% c("REG", "LOGREG", "SVM") ) {
+  if ( is.function(args$model) ) {
+    fit = tryCatch(
+      do.call(args$model, c(list(train, train.outcome), args$fitfun)), #assuming data/target layout
+      error = function(e) do.call(args$model, c(list(cbind(train.outcome, train)), args$fitfun)) #supplying data matrix
+    )
+  } else if ( args$model %in% c("REG", "LOGREG", "SVM") ) {
     fit = do.call( LiblineaR::LiblineaR, modifyList(args$fitfun, list(data=train, target=train.outcome)) )
   } else if ( args$model == "LDA" ) {
     fit = MASS::lda(x=train, grouping=train.outcome)    
@@ -586,7 +615,7 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   ## model prediction where test is a matrix
   test = scale(test, attr(fit, "center"), attr(fit, "scale"))
   preds = predict(fit, test, verbose=F)[[1]]
-  if ( args$model != "REG" ) {
+  if (args$classification) {
     preds = ordered(preds, levels(test.outcome))
     if (args$multiClass) {
       auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1]

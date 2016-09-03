@@ -136,7 +136,7 @@ SSD.coefficients <- function(frequencies, noise.width=2, signal.position="center
   return(SSDcoeffs)
 }
 
-SSD.filter <- function(data, SSDcoeffs, nCores=NULL) {
+SSD.filter <- function(data, SSDcoeffs, nCores=list()) {
   ## create Signal and Noise by filtering supplied data with coefficients b
   ## expects a list with 2/3 different filter coefficients to use with filter.apply
   #INPUT ---
@@ -178,11 +178,13 @@ SSD.apply <- function(SSDdata, average=T, shrinkage=F, q=.1, denoise=T, patterns
   #   if >= 1, a fixed number of components for every participant
   #denoise: if True, use low-rank factorization to denoise measurements (X*W*A')
   #         necessary if subsequent analyses should be performed in original input space
+  #patterns: if True, return the activation patterns per subject as a list 
   #nCores: if data is a subject list, number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
   #RETURNS ---
   #data in component space (if denoise = FALSE) or in original space with reduced rank (denoise = TRUE)
+  #if patterns is True, returns a list with data and a list of the pattern matrices per subject
   if ( class(SSDdata) != "list" || length(SSDdata) != 2 ) {
     stop( "SSDdata must be a list with 2 elements: signal and noise. Refer to the documentation or use SSD.filter." )
   }

@@ -11,7 +11,7 @@
   
   if (util & !"decode.utils" %in% search()) {
     decode.utils = new.env()
-    sys.source("utils.R", envir=decode.utils)
+    sys.source("./utils.R", envir=decode.utils)
     attach(decode.utils)
   }
   if (filt & !"decode.filts" %in% search()) {

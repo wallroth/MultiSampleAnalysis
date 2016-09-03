@@ -1,66 +1,66 @@
 ## FILTER functions
 
-data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
-  ## resample data trial- and column-wise using signal's resample
-  ## uses zero padding so that artifacts won't be carried into the data
-  #INPUT ---
-  #data: continuous df or list of trials, slices, subjects
-  #old.srate: current sampling rate
-  #new.srate: desired sampling rate
-  #nCores: if data is a subject list, number of CPU cores to use for parallelization
-  #        if NULL, automatic selection; if 1, sequential execution
-  #        if an empty list, an externally registered cluster will be used
-  #RETURNS:
-  #data with new sampling rate
-  require(utils, quietly=T); .eval_package(c("MASS","signal"))
-  data = data.check(data, aslist=T, strip=F) #transform to list
-  if ( "slices" %in% attr(data, "type") ) {
-    data = data.split_trials( data, strip=F )
-    .transformed = T #convert to df at the end
-  } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
-    pcheck = .parallel_check(required=length(data), nCores=nCores)
-    outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
-    data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
-      data.resample(d, old.srate, new.srate)
-    .parallel_check(output=pcheck)
-    attr(data, "type") = "subjects"
-    return(data)
-  }
-  nsamples = data.samplenum(data[[1]])
-  frac = MASS::fractions(new.srate/old.srate)
-  #calculate zero pad length:
-  #note: by using fraction, rounding error accumulation is minimized
-  if ( old.srate %% new.srate != 0 ) { 
-    temp = strsplit( attr(frac, "fracs"), "/" )
-    p = as.numeric( temp[[1]][1] )
-    q = as.numeric( temp[[1]][2] )
-  } else { #not a fraction
-    p = new.srate/old.srate 
-    q = 1
-  }
-  nPad = ceiling( (max(p,q) * 10)/q ) * q #N=10 Matlab default
-  n = ceiling( (2*nPad + nsamples)*frac ) #new number of samples
-  unPad = nPad * frac
-  #obtain datacol info with higher sample number by rebinding temporarily
-  datacols = is.datacol( as.data.frame( data.table::rbindlist(data) ) )
-  cat("Resampling:\n")
-  progBar = txtProgressBar(style=3) #progress bar shown during resampling
-  progBarsteps = seq( 1/length(data), 1, length.out=length(data) )
-  #don't interpolate across boundaries:
-  resampled = lapply( seq_along(data), function(i) {
-    temp = data[[i]][, datacols ]
-    padstart = temp[rep(1, nPad), ] #repeat first row n times
-    padend = temp[rep(nrow(temp), nPad), ] #repeat last row n times
-    temp = rbind(padstart, temp, padend) #zero padded trial data
-    #use signal's resample instead of simple linear interpolation (still less refined than Matlab SPT's resample)
-    # temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
-    temp = apply(temp, 2, signal::resample, p=p, q=q)
-    setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
-    data.frame(samples=1:(n-2*unPad), outcome=data[[i]][1,2], temp[(unPad+1):(nrow(temp)-unPad),])
-  })
-  close(progBar)
-  return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
-}
+# data.resample <- function(data, old.srate, new.srate, nCores=NULL) {
+#   ## resample data trial- and column-wise using signal's resample
+#   ## uses zero padding so that artifacts won't be carried into the data
+#   #INPUT ---
+#   #data: continuous df or list of trials, slices, subjects
+#   #old.srate: current sampling rate
+#   #new.srate: desired sampling rate
+#   #nCores: if data is a subject list, number of CPU cores to use for parallelization
+#   #        if NULL, automatic selection; if 1, sequential execution
+#   #        if an empty list, an externally registered cluster will be used
+#   #RETURNS:
+#   #data with new sampling rate
+#   require(utils, quietly=T); .eval_package(c("MASS","signal"))
+#   data = data.check(data, aslist=T, strip=F) #transform to list
+#   if ( "slices" %in% attr(data, "type") ) {
+#     data = data.split_trials( data, strip=F )
+#     .transformed = T #convert to df at the end
+#   } else if ( "subjects" %in% attr(data, "type") ) { #parallelize subjects
+#     pcheck = .parallel_check(required=length(data), nCores=nCores)
+#     outlen = ifelse(length(data) > 100, length(data), 100) #for .maxcombine argument of foreach
+#     data = foreach(d=data, .combine=list, .multicombine=T, .maxcombine=outlen) %dopar%
+#       data.resample(d, old.srate, new.srate)
+#     .parallel_check(output=pcheck)
+#     attr(data, "type") = "subjects"
+#     return(data)
+#   }
+#   nsamples = data.samplenum(data[[1]])
+#   frac = MASS::fractions(new.srate/old.srate)
+#   #calculate zero pad length:
+#   #note: by using fraction, rounding error accumulation is minimized
+#   if ( old.srate %% new.srate != 0 ) { 
+#     temp = strsplit( attr(frac, "fracs"), "/" )
+#     p = as.numeric( temp[[1]][1] )
+#     q = as.numeric( temp[[1]][2] )
+#   } else { #not a fraction
+#     p = new.srate/old.srate 
+#     q = 1
+#   }
+#   nPad = ceiling( (max(p,q) * 10)/q ) * q #N=10 Matlab default
+#   n = ceiling( (2*nPad + nsamples)*frac ) #new number of samples
+#   unPad = nPad * frac
+#   #obtain datacol info with higher sample number by rebinding temporarily
+#   datacols = is.datacol( as.data.frame( data.table::rbindlist(data) ) )
+#   cat("Resampling:\n")
+#   progBar = txtProgressBar(style=3) #progress bar shown during resampling
+#   progBarsteps = seq( 1/length(data), 1, length.out=length(data) )
+#   #don't interpolate across boundaries:
+#   resampled = lapply( seq_along(data), function(i) {
+#     temp = data[[i]][, datacols ]
+#     padstart = temp[rep(1, nPad), ] #repeat first row n times
+#     padend = temp[rep(nrow(temp), nPad), ] #repeat last row n times
+#     temp = rbind(padstart, temp, padend) #zero padded trial data
+#     #use signal's resample instead of simple linear interpolation (still less refined than Matlab SPT's resample)
+#     # temp = sapply( apply(temp, 2, approx, n=n), "[[", 2)
+#     temp = apply(temp, 2, signal::resample, p=p, q=q)
+#     setTxtProgressBar(progBar, progBarsteps[i]) #update progress bar
+#     data.frame(samples=1:(n-2*unPad), outcome=data[[i]][1,2], temp[(unPad+1):(nrow(temp)-unPad),])
+#   })
+#   close(progBar)
+#   return( data.check(resampled, aslist=F, transform=.transformed) ) #transform to df if needed
+# }
 
 filter.coefficients <- function(frequencies, transwidth, ftype, srate, wtype="hamming") {
   ## creates windowed sinc FIR filter coefficients for the given frequency
@@ -92,17 +92,16 @@ filter.coefficients <- function(frequencies, transwidth, ftype, srate, wtype="ha
   return( signal::Ma(b) )
 }
 
-filter.apply <- function(data, coefficients, nCores=NULL) {
+filter.apply <- function(data, coefficients, nCores=list()) {
   ## function to apply the filter coefficients b from filter.coefficients to the data
   ## for FIR filter uses zero-phase one-pass filtering
   ## for IIR filter uses zero-phase two-pass filtering
   ## in either case filtering is done within trials, i.e. boundaries are respected
   #INPUT ---
-  #data: df, matrix, vector or list of trials, slices, subjects
   #coefficients: filter coefficients, e.g. from filter.coefficients, signal::fir1, signal::butter
   #              either of class 'Ma' (moving average) or class 'Arma' (autoregressive Ma)
   #              if numeric, converted to class 'Ma' (FIR)
-  #nCores: if data is a subject list, number of CPU cores to use for parallelization
+  #nCores: number of CPU cores to use for parallelization
   #        if NULL, automatic selection; if 1, sequential execution
   #        if an empty list, an externally registered cluster will be used
   #Notes ---
@@ -118,29 +117,38 @@ filter.apply <- function(data, coefficients, nCores=NULL) {
     else stop( "coefficients must be of class 'Ma' or 'Arma', cf. signal package." )
   }
   FIR = class(coefficients) == "Ma" #moving average, otherwise IIR
-  trialN = data[, .(N=uniqueN(trial)), by=.(subject)][, sum(N)]
+  #transform data
+  dataMat = unname( as.matrix(data[, .SD, .SDcols=nm]) ) #transform data to matrix (measurements only)
+  dataInfo = data[, .SD, .SDcols=!nm] #info columns DT with subset information
+  subIDs = data[, unique(subject)]
+  trialList = do.call(c, lapply(subIDs, function(sub) { #create trial list per subject
+    idx = dataInfo[.(sub), which=T] #indices for subject
+    idx = split(idx, dataInfo[idx, trial]) #split for subject trials
+    lapply(idx, function(tr) dataMat[tr,]) #subset data
+  }))
   groupDelay = (length(coefficients)-1)/2
   padStart = rep(1, groupDelay) #repeat first row n times
   padEnd = rep(data[, max(sample)], groupDelay) #repeat last row n times
-  sublist = split(data, data[, subject]) #parallelize the subjects
-  cl = parBackend(nCores, required=length(sublist)) #initialize parallel backend (if not already)
+  cl = parBackend(nCores, required=length(trialList)) #initialize parallel backend (if not already)
   
-  filtdata = foreach(d=sublist, .combine=function(...) rbindlist(list(...)), 
-                     .multicombine=T, .maxcombine=length(sublist)+1) %dopar%
-    d[, {
-      lapply(.SD, function(s) {
-        if (FIR) { #Ma
-          sf = signal::filter( filt=coefficients, x=c(s[padStart], s, s[padEnd]) ) #padded signal  
-          sf[(2*groupDelay+1):length(sf)] #remove padded data
-        } else { #Arma
-          signal::filtfilt(filt=coefficients, x=s) #two-pass: forward and reverse filtering
-        }
-      })
-    }, .SDcols=nm, by=.(subject,trial)]
-  
+  filtdata = foreach(trial=trialList, .combine=function(...) do.call(rbind, list(...)), 
+                     .multicombine=T, .maxcombine=length(trialList)+1) %dopar% 
+            {
+              if (FIR) { #Ma
+                apply(trial, 2, function(s) {
+                  sf = signal::filter( filt=coefficients, x=c(s[padStart], s, s[padEnd]) ) #padded signal  
+                  sf[(2*groupDelay+1):length(sf)] #remove padded data  
+                })
+              } else { #Arma
+                apply(trial, 2, function(s) {
+                  signal::filtfilt(filt=coefficients, x=s) #two-pass: forward and reverse filtering
+                })
+              }
+            }
+
   parBackend(cl) #close backend (if initialized by function) and print final time
   if (identical(nm, ".x")) return( data$.x ) #return vector
-  return( data.check( filtdata[, ':=' (sample = data[, sample], outcome = data[, outcome])] )[] )
+  return( data.check( setnames(cbind(dataInfo, as.data.table(filtdata)), names(data)) )[] )
 }
 
 

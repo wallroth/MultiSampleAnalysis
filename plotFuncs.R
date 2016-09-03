@@ -10,7 +10,8 @@
     theme(plot.title = element_blank(),
           panel.grid.major = element_blank(), 
           panel.grid.minor = element_blank(),
-          axis.line = element_line(size=1, colour="black"), #parallel line to axis (both x,y)
+          axis.line.x = element_line(size=1, colour="black"), #parallel line to axis (both x,y)
+          axis.line.y = element_line(size=1, colour="black"), #parallel line to axis (both x,y)
           panel.border = element_blank(), 
           panel.background = element_blank(),
           axis.title.x = element_text(face="bold", size=15), 
@@ -21,7 +22,9 @@
           legend.text = element_text(size=14),
           legend.background = element_blank(), #element_rect(linetype=1, colour="black"),
           legend.position = "right", #c(.9,.9), #"none"
-          legend.key=element_blank())
+          legend.key=element_blank(),
+          strip.background = element_rect(fill = "white", colour = "white"),
+          strip.text = element_text(size=14, face="bold"))
   return(ggTheme)
 }
 
@@ -67,6 +70,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   #cols: colours according to groupvar or xvar if no groupvar
   #ggTheme: ggplot theme, possible to modify details by adding + theme(...) 
   #         e.g. ggTheme + theme(legend.position = "none")
+  #...: further arguments to decode.test
   .eval_package("ggplot2", load=T)
   if (!is.data.table(result)) setDT(result)
   # args.in = lapply( as.list(match.call())[-c(1,2)], eval.parent, n=2 )
@@ -226,7 +230,11 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
     update_geom_defaults("point", list(colour = "black")) #change back
     return(p)
   }
-  if (CI) t = qt(1-args$decode.test$alpha/2, result[x==x[1], .N, by=g][1,N-1]) #t-statistic for confidence interval
+  if (CI && is.null(args.in$t.ci)) {
+    t = qt(1-args$decode.test$alpha/2, result[x==x[1], .N, by=g][1,N-1]) #t-statistic for confidence interval
+  } else if (CI) {
+    t = args.in$t.ci
+  }
   if (!groups && lineplot) ggTheme = ggTheme + theme(legend.position="none")
   data[, g:=as.factor(g)]
   #undo changes to result
@@ -239,7 +247,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
     p = do.call(plotStr, list(data, signtest, txt))
     return(p)
   } else { #no averaging
-    n = result[, uniqueN(id)]
+    n = data[, uniqueN(id)]
     if (is.null(multi.layout) && lineplot) { #single plot
       data = data[ g != args$decode.test$within.null ][, g:=NULL] #keep only true label data
       if (length(cols) < n) cols = colorRampPalette(c("gray30","gray90"), alpha=T)(n)
@@ -412,7 +420,7 @@ plot.ERP <- function(data, multi.layout=NULL, butterfly=F, columns=NULL, colours
   #colours: if butterfly, colour for each channel, else colour for each outcome
   #rest: see plot.decode
   .eval_package("ggplot2", load=T)
-  data = data.check(data)
+  # data = data.check(data)
   if (is.null(columns)) columns = setdiff( names(data), key(data) )
   n = ifelse(butterfly, length(columns), data[, uniqueN(outcome)])
   if (is.null(colours) && n <= 5) colours = c("#0072BD", "#D95319", "#EDB120", "#7E2F8E", "#77AC30")[1:n]
@@ -421,12 +429,12 @@ plot.ERP <- function(data, multi.layout=NULL, butterfly=F, columns=NULL, colours
   if (is.null(multi.layout)) { #aggregate over subjects
     ERP = data[, lapply(.SD, mean), .SDcols=columns, by=.(sample,outcome)]
     if (!butterfly) { #aggregate the channels
-      ERP = ERP[, .(sample,outcome,erp=ERP[, rowMeans(.SD), .SDcols=columns])]
+      ERP = ERP[, .(erp=rowMeans(.SD)), by=.(sample,outcome)]
     }
   } else {
     ERP = data[, lapply(.SD, mean), .SDcols=columns, by=.(subject,sample,outcome)]
     if (!butterfly) { #aggregate the channels
-      ERP = ERP[, .(subject,sample,outcome,erp=ERP[, rowMeans(.SD), .SDcols=columns])]
+      ERP = ERP[, .(erp=rowMeans(.SD)), by=.(subject,sample,outcome)]
     }
   }
   if (butterfly) { #each channel individually

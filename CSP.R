@@ -39,9 +39,11 @@ decompose.CSP <- function(data, npattern=3, shrinkage=F, average=F) {
   #npattern: patterns to extract * 2 (for each condition), 
   # -> if too low the features may not contain sufficient information for the classifiers
   # -> if too high, risk of overfitting
+  #shrinkage: bool, if True use shrinkage covariance estimation
+  #average: bool, if True compute covariance per trial and average afterwards (slower),
+  #         otherwise compute covariance on all trials stacked on top of each other
   #NOTE: if outcome is not binary, one vs. the rest approach is taken
   #ToDo: - currently just centered. (x'*X / trace) (Lu et al.)?
-  #      - center before cov? trial averaged C? (compare wyrm)
   data = data.check(data)
   k = data[, sort(unique(outcome))] #check outcome and sort (otherwise its order will conform to the first appearance in data)
   if ( length(k) > 2 ) { #one vs. the rest (OVR)
@@ -454,17 +456,4 @@ plot.SpecCSP <- function(Spec.result, ylims=c(0,1), title="",
          lty=lty, lwd=rep(lwd, length(classes)), bty="n")
 }
 
-
-# .CSP.write_patterns <- function(patternlist) {
-#   ## function to write CSP pattern data into a matlab friendly format
-#   #INPUT ---
-#   #patternlist: output from decompose.CSP
-#   dir.create(path="./patterns", showWarnings = F)
-#   lapply(1:length(patternlist), function(i) {
-#     write.table(patternlist[[i]], 
-#                 file=paste0("./patterns/pattern",i,".txt"), 
-#                 sep=",", row.names=F, col.names=F)
-#   })
-#   return("Done.")
-# }
 
