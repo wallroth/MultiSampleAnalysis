@@ -618,7 +618,13 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   if (args$classification) {
     preds = ordered(preds, levels(test.outcome))
     if (args$multiClass) {
-      auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1]
+      # auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1] ## buggy??
+      auc = mean(combn(levels(test.outcome), m=2, FUN=function(x) { #average over binary comparisons
+        idx = test.outcome %in% x
+        response = as.integer(test.outcome[idx] == x[1])
+        pred = as.integer(preds[idx] == x[1])
+        pROC::auc(response, pred, direction="<", algorithm=3)[1]
+      }))
     } else {
       auc = pROC::auc(test.outcome, preds, direction="<", algorithm=3)[1]
     }
