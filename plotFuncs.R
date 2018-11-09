@@ -7,17 +7,30 @@
   ## generate nice gg theme
   .eval_package("ggplot2", load=T)
   ggTheme <- theme_bw() + 
+<<<<<<< HEAD
     theme(plot.title = element_text(size=14, face="plain", hjust=.5, margin=margin(b=10)),
           panel.grid.major = element_blank(), 
           panel.grid.minor = element_blank(),
           axis.line = element_line(size=.75, colour="black"), #parallel line to axis (both x,y)
+=======
+    theme(plot.title = element_text(size=14, face="plain", margin=margin(b=10)),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(size=.75, colour="black"), #parallel line to axis (both x,y)
+          axis.line.y = element_line(size=.75, colour="black"), #parallel line to axis (both x,y)
+>>>>>>> origin/dev
           panel.border = element_blank(), 
           panel.background = element_blank(),
           axis.title.x = element_text(face="plain", size=14), 
           axis.title.y = element_text(face="plain", size=14),# angle=0, vjust=1, hjust=4),
+<<<<<<< HEAD
           axis.text.x = element_text(size=12, colour="black"), 
           axis.text.y = element_text(size=12, colour="black"), 
           axis.ticks = element_line(colour="black"),
+=======
+          axis.text.x = element_text(size=12), 
+          axis.text.y = element_text(size=12), 
+>>>>>>> origin/dev
           legend.title = element_text(face="plain", size=13),
           legend.text = element_text(size=12),
           legend.background = element_blank(), #element_rect(linetype=1, colour="black"),
