@@ -421,7 +421,7 @@ parBackend <- function(cores=NULL, code="decode.R", ...) {
     doParallel::registerDoParallel(cluster) #register
     #TEMP export functions to cluster
     parallel::clusterExport(cluster, "code", envir=environment())
-    parallel::clusterEvalQ(cluster, expr={ source(code, chdir=T); require(data.table) })
+    parallel::clusterEvalQ(cluster, expr={ source(code, chdir=T); require(data.table); require(LiblineaR); require(kernlab) })
     cat( "Distributing", list(...)$required, "jobs to", cores, "workers . . .\n" )
     return( setattr(cluster,"start.time",start.time) ) #return the cluster with time attribute
   } else if ( length(cores) > 0 && getDoParRegistered() ) { #active cluster to shut down

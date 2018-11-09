@@ -459,7 +459,7 @@ model.fit <- function(train, test=NULL, model="LogReg", center=T, scale=T, ...) 
   return(fit)
 }
 
-fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials", random=T) {
+fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials", random=T, stratified=T) {
   ## creates a stratified CV scheme for convenient join operations (subset) with data
   #all samples of a trial are assigned to the same fold
   #INPUT ---
@@ -468,6 +468,9 @@ fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials", ran
   #           if outcome is a float, n.classes will default to 5 (=4 groups) if not specified
   #fold.type: trials|subjects - specifies if folds are built with trials or subject ids
   #random: bool, if True, fold assignment is shuffled, otherwise in order of appearance (chronological)
+  #stratified: bool, if True, balance outcome across folds, else random assignment
+  #           notably, for LOO with stratification you get as many folds as the least common class as
+  #           each class needs to be represented in a fold; without stratification LOO is simply one trial per fold
   #RETURNS ---
   #a DT with the CV scheme with columns subject|fold|trial|(outcome)
   fold.type = tolower(fold.type)
@@ -484,42 +487,58 @@ fold.idx <- function(data, n.folds=NULL, n.classes=NULL, fold.type="trials", ran
       class.tab = table(outcome) #unique classes and counts
       class.tab = class.tab[class.tab > 0] #in case of undropped factor levels
       #if n.folds not specified: Leave-One-Out based on minimum outcome occurence
-      if ( is.null(n.folds) || n.folds <= 0 ) k = min(class.tab)
-      else k = n.folds
-      if (k <= 1) { #percentage of trials per outcome which go into test set
+      if ( is.null(n.folds) || n.folds <= 0 ) {
+        if (stratified) k = min(class.tab) else k = .N
+      } else {
+        k = n.folds
+      }
+      if (k < 1) { #percentage of trials per outcome which go into test set
         test = c() #trial vector
-        for (i in 1:length(class.tab)) {
-          test = c(test, sample( trial[ outcome==names(class.tab)[i] ], size=round(class.tab[i]*k) )) #sample trial index  
+        if (stratified) {
+          for (i in 1:length(class.tab)) {
+            test = c(test, sample( trial[ outcome==names(class.tab)[i] ], size=round(class.tab[i]*k) )) #sample trial index  
+          }
+        } else { #not stratified
+          test = sample(trial, size=round(.N*k))
+          if (!random) test = sort(test)
         }
         .(fold = 1, trial = test, outcome = outcome[trial %in% test]) #return
       } else { #fold split
-        if ( any(class.tab%/%k < 1) ) stop( "Cannot have more folds than trials per class." )
-        folds = rep(0, length(outcome)) #fold vector
-        for (i in 1:length(class.tab)) {
-          num.reps = class.tab[i]%/%k #num times of class per fold
-          if (random) {
-            folds[ outcome==names(class.tab)[i] ] = c( sample(rep(1:k, num.reps)), sample(1:k, class.tab[i]%%k) ) #append if any are left
-          } else { #chronological order
-            rest = class.tab[i]%%k
-            folds[ outcome==names(class.tab)[i] ] = c( rep(1:k, each=num.reps), if (rest > 0) (k-rest+1):k )
+        if (stratified) {
+          if ( any(class.tab%/%k < 1) ) stop( "Cannot have more folds than trials per class." )
+          folds = rep(0, length(outcome)) #fold vector
+          for (i in 1:length(class.tab)) {
+            num.reps = class.tab[i]%/%k #num times of class per fold
+            if (random) {
+              folds[ outcome==names(class.tab)[i] ] = c( sample(rep(1:k, num.reps)), sample(1:k, class.tab[i]%%k) ) #append if any are left
+            } else { #chronological order
+              rest = class.tab[i]%%k
+              folds[ outcome==names(class.tab)[i] ] = c( rep(1:k, each=num.reps), if (rest > 0) (k-rest+1):k )
+            }
           }
+        } else { #non-stratified
+          folds = rep(1:k, each=.N/k)
+          rest = .N-length(folds)
+          if (rest>0) folds = sort(c(folds, 1:rest))
+          if (random) folds = sample(folds)
         }
         .(fold = folds, trial = trial, outcome = outcome) #return
       }
     }, by=subject]
   } else { #create folds with all trials from a subset of the subjects
     folds = setkeyv(data[, .(subject = unique(subject))][, {
-    if ( is.null(n.folds) || n.folds <= 0 ) n.folds = length(subject) #Leave-One-Subject-Out
-    if (n.folds <= 1) { #percentage of subjects which go into test set
-      .(fold = 1, subject = sample( subject, size=round(length(subject)*n.folds) )) #return
-    } else { #fold split
-      if (n.folds > length(subject)) stop( "Cannot have more folds than subjects." )
-      if (random) {
-        .(fold = sample(cut(subject, breaks=n.folds, labels=F, include.lowest=T)), subject = subject)
-      } else {
-        .(fold = cut(subject, breaks=n.folds, labels=F, include.lowest=T), subject = subject)
+      if ( is.null(n.folds) || n.folds <= 0 ) n.folds = .N #Leave-One-Subject-Out
+      if (n.folds < 1) { #percentage of subjects which go into test set
+        .(fold = 1, subject = sample( subject, size=round(.N*n.folds) )) #return
+      } else { #fold split
+        if (n.folds > .N) stop( "Cannot have more folds than subjects." )
+        folds = rep(1:n.folds, each=.N/n.folds)
+        rest = .N-length(folds)
+        if (rest>0) folds = sort(c(folds, 1:rest))
+        if (random) folds = sample(folds)
+        .(fold = folds, subject = subject)
       }
-    } }], c("fold", "subject"))[data[, .(trial=unique(trial)), by=subject], on="subject"]
+    }], c("fold", "subject"))[data[, .(trial=unique(trial)), by=subject], on="subject"]
   }
   return( setkeyv(folds, c("subject","fold","trial"))[] )
 }
@@ -618,7 +637,13 @@ data.permute_classes <- function(data, tol=1, allow.identical=F) {
   if (args$classification) {
     preds = ordered(preds, levels(test.outcome))
     if (args$multiClass) {
-      auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1]
+      # auc = pROC::multiclass.roc(test.outcome, preds, direction="<", algorithm=3)$auc[1] ## buggy??
+      auc = mean(combn(levels(test.outcome), m=2, FUN=function(x) { #average over binary comparisons
+        idx = test.outcome %in% x
+        response = as.integer(test.outcome[idx] == x[1])
+        pred = as.integer(preds[idx] == x[1])
+        pROC::auc(response, pred, direction="<", algorithm=3)[1]
+      }))
     } else {
       auc = pROC::auc(test.outcome, preds, direction="<", algorithm=3)[1]
     }

@@ -7,7 +7,7 @@
   #filt: filterFuncs.R - temporal filtering
   #CSP: CSP.R - common spatial patterns algorithm
   #SSD: SSD.R - spatio-spectral decomposition
-  #ML: ML.R - machine learning
+  #ML: ML.R - machine learning #new: ML2.R
   
   if (util & !"decode.utils" %in% search()) {
     decode.utils = new.env()
@@ -39,6 +39,12 @@
     sys.source("plotFuncs.R", envir=decode.plots)
     attach(decode.plots)
   }
+  #new:
+  if (ML & !"decode.ML2" %in% search()) {
+    decode.ML2 = new.env()
+    sys.source("ML2.R", envir=decode.ML2)
+    attach(decode.ML2)
+  }
 }
 
 .unloadFuncs <- function() {
@@ -48,4 +54,4 @@
 }
 
 #default call to utils when sourced
-.loadFuncs(util=T, filt=T, ML=T, CSP=T, SSD=T, plot=T)
+.loadFuncs(util=T, filt=T, ML=T, CSP=F, SSD=F, plot=T)

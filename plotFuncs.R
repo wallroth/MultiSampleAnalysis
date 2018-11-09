@@ -7,24 +7,24 @@
   ## generate nice gg theme
   .eval_package("ggplot2", load=T)
   ggTheme <- theme_bw() + 
-    theme(plot.title = element_blank(),
+    theme(plot.title = element_text(size=14, face="plain", hjust=.5, margin=margin(b=10)),
           panel.grid.major = element_blank(), 
           panel.grid.minor = element_blank(),
-          axis.line.x = element_line(size=1, colour="black"), #parallel line to axis (both x,y)
-          axis.line.y = element_line(size=1, colour="black"), #parallel line to axis (both x,y)
+          axis.line = element_line(size=.75, colour="black"), #parallel line to axis (both x,y)
           panel.border = element_blank(), 
           panel.background = element_blank(),
-          axis.title.x = element_text(face="bold", size=15), 
-          axis.title.y = element_text(face="bold", size=15),# angle=0, vjust=1, hjust=4),
-          axis.text.x = element_text(size=14), 
-          axis.text.y = element_text(size=14), 
-          legend.title = element_text(face="bold", size=15),
-          legend.text = element_text(size=14),
+          axis.title.x = element_text(face="plain", size=14), 
+          axis.title.y = element_text(face="plain", size=14),# angle=0, vjust=1, hjust=4),
+          axis.text.x = element_text(size=12, colour="black"), 
+          axis.text.y = element_text(size=12, colour="black"), 
+          axis.ticks = element_line(colour="black"),
+          legend.title = element_text(face="plain", size=13),
+          legend.text = element_text(size=12),
           legend.background = element_blank(), #element_rect(linetype=1, colour="black"),
           legend.position = "right", #c(.9,.9), #"none"
           legend.key=element_blank(),
           strip.background = element_rect(fill = "white", colour = "white"),
-          strip.text = element_text(size=14, face="bold"))
+          strip.text = element_text(size=13, face="plain"))
   return(ggTheme)
 }
 
@@ -72,6 +72,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   #         e.g. ggTheme + theme(legend.position = "none")
   #...: further arguments to decode.test
   .eval_package("ggplot2", load=T)
+  result = copy(result)
   if (!is.data.table(result)) setDT(result)
   # args.in = lapply( as.list(match.call())[-c(1,2)], eval.parent, n=2 )
   args.in = as.list(match.call())[-c(1,2)]
@@ -137,8 +138,8 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   if (lineplot || groups) { #design xAxis if lineplot or for boxplot if groups were specified in addition to xvar
     npoints = data[, uniqueN(x)] #number of points on xAxis
     if (!is.null(xrange)) { #replace slice number with time stamp
-      timestep = diff(xrange)/npoints
-      timepoints = seq(xrange[1], xrange[2], by=timestep)[-(npoints+1)] #left aligned
+      timestep = diff(xrange)/(npoints-1)
+      timepoints = seq(xrange[1], xrange[2], by=timestep) #left aligned
       data[, x := timepoints[ findInterval(x, unique(x)) ]] #add time info: slices are likely unsorted
       if (ptest) signtest[, x := timepoints[ findInterval(x, unique(x)) ]]
     }
@@ -237,10 +238,10 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
   }
   if (!groups && lineplot) ggTheme = ggTheme + theme(legend.position="none")
   data[, g:=as.factor(g)]
-  #undo changes to result
-  setnames(result, old=c("y","x"), new=c(yvar,xvar))
-  if (!groups) result[, g:=NULL] else setnames(result, "g", groupvar)
-  if (!IDs) result[, id:=NULL] else setnames(result, "id", idvar)
+  # #undo changes to result
+  # setnames(result, old=c("y","x"), new=c(yvar,xvar))
+  # if (!groups) result[, g:=NULL] else setnames(result, "g", groupvar)
+  # if (!IDs) result[, id:=NULL] else setnames(result, "id", idvar)
   ## plot 
   plotStr = ifelse(lineplot, "ggLineplot", "ggBoxplot")
   if (average) { #single lineplot aggregated for all subjects
@@ -260,7 +261,7 @@ plot.decode <- function(result, multi.layout=NULL, average=T, lineplot=T, CI=F, 
       .eval_package("gridExtra", load=T)
       idVals = data[, unique(id)]
       if (length(txt) != n) txt = paste0(txt, idVals)
-      plist = lapply(seq_len(n), function(i) do.call( plotStr, list(data[id == idVals[i]], signtest[id == idVals[i]], txt=txt[i]) ))
+      plist = lapply(seq_len(n), function(i) do.call( plotStr, list(data[id == idVals[i]], if (ptest) signtest[id == idVals[i]], txt=txt[i]) ))
       multipage = multi.layout[1] * multi.layout[2] #plots per page
       for (i in seq(1+multipage, n+multipage, multipage)) { #iterate until all plots are created
         pl = lapply( (i-multipage):min(i-2,n-1), function(x) plist[[x]]+theme(legend.position="none") )
@@ -351,8 +352,8 @@ plot.GAT <- function(GAT, contrast=F, range=NULL, onset=T, limits=NULL, ticks=NU
   #create timeAxis
   npoints = GAT.data[, uniqueN(slice)] #number of points on axis
   if (!is.null(range)) { #replace slice number with time stamp
-    timestep = diff(range)/npoints
-    timepoints = seq(range[1], range[2], by=timestep)[-(npoints+1)] #left aligned
+    timestep = diff(range)/(npoints-1)
+    timepoints = seq(range[1], range[2], by=timestep) #left aligned
     GAT.data[, ':=' (slice = timepoints[ findInterval(slice, unique(slice)) ], 
                      test = timepoints[ findInterval(test, unique(test)) ])]
   }
